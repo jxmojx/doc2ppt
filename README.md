@@ -114,7 +114,8 @@ samples/             三份合成样例（报告 / 纪要 / 方案）
 test_smoke.py        37 个测试
 make_template.py     生成默认母版
 make_samples.py      生成三份样例
-DECISIONS.md         实现决策与踩坑记录（166 条）
+DECISIONS.md         实现决策与踩坑记录（167 条）
+LICENSE              MIT
 ```
 
 ## 测试与评测
@@ -147,4 +148,8 @@ $env:DOC2PPT_SLOW="1"; python -m pytest test_smoke.py -q   # 全量：37 passed
 
 ## 说明
 
-样例文档均为脚本生成的合成内容，不含真实个人或公司数据。项目未添加开源许可证。
+样例文档均为脚本生成的合成内容，不含真实个人或公司数据。
+
+## License
+
+[MIT](LICENSE)
