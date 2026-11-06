@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 工具/会话数据
+.mimosa/
+.zcode/
+
+# 运行时产物（正常在项目外，这里兜底）
+preview/
+baseline/
+logs/
+.cache/
+*.log
+
+# 环境与密钥
+.env
+.env.*
+*.pem
+*.key
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
