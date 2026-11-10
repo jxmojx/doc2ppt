@@ -1,3 +1,0 @@
-doc2ppt
-run
-server

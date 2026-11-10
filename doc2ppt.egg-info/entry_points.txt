@@ -1,3 +1,0 @@
-[console_scripts]
-doc2ppt = run:main
-doc2ppt-server = server:main

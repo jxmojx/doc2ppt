@@ -28,3 +28,8 @@ logs/
 Thumbs.db
 .idea/
 .vscode/
+
+# 打包产物
+build/
+dist/
+*.egg-info/
