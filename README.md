@@ -114,7 +114,8 @@ samples/             三份合成样例（报告 / 纪要 / 方案）
 test_smoke.py        37 个测试
 make_template.py     生成默认母版
 make_samples.py      生成三份样例
-DECISIONS.md         实现决策与踩坑记录（167 条）
+skill/doc2ppt/       Agent Skill 封装（SKILL.md）
+DECISIONS.md         实现决策与踩坑记录（168 条）
 LICENSE              MIT
 ```
 
@@ -149,6 +150,10 @@ $env:DOC2PPT_SLOW="1"; python -m pytest test_smoke.py -q   # 全量：37 passed
 ## 说明
 
 样例文档均为脚本生成的合成内容，不含真实个人或公司数据。
+
+## 作为 Agent Skill 接入
+
+`skill/doc2ppt/SKILL.md` 把「输入文章 → 输出 PPT」封装成了 Agent Skill（兼容 Claude/Agent Skills 格式）：把它复制进你的 Agent 技能目录（或把内容贴入系统提示），Agent 即可在用户说"把这篇文章做成 PPT"时自动走 doc2ppt 管线——环境自检、纯文本补标题结构、调用 `run.py`、检查问题数并交付预览。详见 [skill/doc2ppt/SKILL.md](skill/doc2ppt/SKILL.md)。
 
 ## License
 
