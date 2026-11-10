@@ -251,7 +251,8 @@ def test_pdf_borderless_table(tmp_path):
     pdf = tmp_path / "borderless.pdf"
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
-    font = pymupdf.Font(fontfile="C:/Windows/Fonts/msyh.ttc")
+    msyh = "C:/Windows/Fonts/msyh.ttc"
+    font = pymupdf.Font(fontfile=msyh) if os.path.exists(msyh) else pymupdf.Font("china-s")
     tw = pymupdf.TextWriter(page.rect)
     rows = [("指标", "目标值", "实际值"), ("首响准确率", "85%", "87.2%"),
             ("人工转接率", "25%", "21.6%"), ("平均响应时长", "30秒", "18秒")]

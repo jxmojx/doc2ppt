@@ -1,6 +1,6 @@
 # doc2ppt
 
-[![CI](https://github.com/jxmojx/doc2ppt/actions/workflows/ci.yml/badge.svg)](https://github.com/jxmojx/doc2ppt/actions/workflows/fast)
+[![CI](https://github.com/jxmojx/doc2ppt/actions/workflows/ci.yml/badge.svg)](https://github.com/jxmojx/doc2ppt/actions)
 
 把 **docx / pdf / md** 自动转成**可编辑**的 PowerPoint：解析 → 大纲 → 版式选型 → 模板槽位渲染 → 渲染真值校验 → 自动修复。
 

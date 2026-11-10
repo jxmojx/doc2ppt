@@ -33,3 +33,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# 生成物误入 samples 的兜底
+samples/*.pptx
