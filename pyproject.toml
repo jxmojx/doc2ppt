@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc2ppt"
+version = "1.0.0"
+description = "文档转 PPT：docx/pdf/md → 可编辑原生 PPTX（模板适配 + 渲染真值校验修复 + CLI/Web）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "jxmojx" }]
+keywords = ["pptx", "document-conversion", "chinese-typography", "llm", "python-pptx"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Office/Business :: Office Suites",
+]
+dependencies = [
+    "python-pptx>=1.0",
+    "pymupdf>=1.25",
+    "python-docx>=1.1",
+    "markdown-it-py>=3.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime>=1.3", "pillow>=10"]
+
+[project.scripts]
+doc2ppt = "run:main"
+doc2ppt-server = "server:main"
+
+[tool.setuptools]
+packages = ["doc2ppt"]
+py-modules = ["run", "server"]
+
+[tool.setuptools.package-data]
+doc2ppt = ["templates/*.pptx"]

@@ -1,5 +1,7 @@
 # doc2ppt
 
+[![CI](https://github.com/jxmojx/doc2ppt/actions/workflows/ci.yml/badge.svg)](https://github.com/jxmojx/doc2ppt/actions/workflows/fast)
+
 把 **docx / pdf / md** 自动转成**可编辑**的 PowerPoint：解析 → 大纲 → 版式选型 → 模板槽位渲染 → 渲染真值校验 → 自动修复。
 
 不是"把文档截图贴进幻灯片"——文字、表格、图表全部是 PPT 原生对象，生成后可以继续改字、改数据、换模板。
@@ -11,6 +13,8 @@
 - **中文排版**：字号全篇统一、长段按句读切分、标点避头尾、短页垂直平衡
 - **可选 LLM 大纲**：模型只决定分页/标题/讲稿，正文必须按块编号引用原文，从结构上避免编造；失败自动回退规则版
 - **校验修复闭环**：用 PowerPoint 渲染结果做真值，检测溢出与标点孤行，最多 5 轮定点修复
+- **跨平台校验**：Windows 走 PowerPoint COM；Linux/macOS 走 LibreOffice 无头渲染，复用同一套像素溢出检测（标点检查仅 COM 通道提供）
+- **可选 OCR**：`pip install "doc2ppt[ocr]"` 后，扫描版 PDF（无文本层）也能解析出标题与正文
 - **双入口**：命令行 + 本地 Web（上传 → 转换 → 下载），不依赖 Flask/FastAPI
 - **评测可复现**：37 个自动化测试 + 6 份评测用例 + 三份视觉基线
 
@@ -32,6 +36,13 @@
 git clone https://github.com/jxmojx/doc2ppt.git
 cd doc2ppt
 python -m pip install -r requirements.txt
+```
+
+**或直接 pip 安装**（模板随包分发，装完即有 `doc2ppt` / `doc2ppt-server` 两个命令）：
+
+```powershell
+pip install git+https://github.com/jxmojx/doc2ppt.git
+doc2ppt 文章.md -o 演示.pptx
 ```
 
 ### 命令行
@@ -111,11 +122,11 @@ doc2ppt/
   models.py          数据契约
 templates/           默认 16:9 母版
 samples/             三份合成样例（报告 / 纪要 / 方案）
-test_smoke.py        37 个测试
+test_smoke.py        38 个测试
 make_template.py     生成默认母版
 make_samples.py      生成三份样例
 skill/doc2ppt/       Agent Skill 封装（SKILL.md）
-DECISIONS.md         实现决策与踩坑记录（168 条）
+DECISIONS.md         实现决策与踩坑记录（172 条）
 LICENSE              MIT
 ```
 
@@ -141,10 +152,10 @@ $env:DOC2PPT_SLOW="1"; python -m pytest test_smoke.py -q   # 全量：37 passed
 
 ## 已知限制
 
-- 扫描版 PDF 不做 OCR（需先 OCR）
 - 图表支持 2–8 行、单位一致、最多 2 个数值列；单位混排时保留表格
 - 两栏版式仅用于纯列表页
-- 完整像素校验依赖 Windows + 桌面版 PowerPoint；无 Office 时降级为估算并提示
+- 标点避头尾检查仅 Windows + 桌面版 PowerPoint 提供；Linux/macOS 走 LibreOffice 渲染（溢出检测相同，标点检查跳过并显式提示）
+- 扫描版 PDF 需安装 OCR 扩展：`pip install "doc2ppt[ocr]"`
 - Web 为单机单用户：无鉴权、无 TLS、无任务队列，转换串行执行
 
 ## 说明

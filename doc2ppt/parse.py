@@ -210,6 +210,8 @@ def parse_pdf(path):
     doc = pymupdf.open(path)
     raw = []  # [(kind, payload)] 按阅读顺序；line 段已合并为段落
     for page in doc:
+        # 扫描页判定：无文本层。整页大图只是扫描容器，不作为插图输出
+        scanned_page = not page.get_text("text").strip()
         tables = _page_tables(page)
         tab_rects = [t.bbox for t in tables]
 
@@ -229,11 +231,12 @@ def parse_pdf(path):
             entries.append((bbox[1], bbox[0], "table", data))
             tab_rects.append(bbox)
         # 图片：按 bbox 插入阅读顺序（与 docx 一致，供渲染层真嵌入）
-        for info in page.get_image_info(xrefs=True):
-            img = _pdf_image(doc, info.get("xref"))
-            if img:
-                bb = info["bbox"]
-                entries.append((bb[1], bb[0], "image", img))
+        if not scanned_page:
+            for info in page.get_image_info(xrefs=True):
+                img = _pdf_image(doc, info.get("xref"))
+                if img:
+                    bb = info["bbox"]
+                    entries.append((bb[1], bb[0], "image", img))
         for b in page.get_text("dict")["blocks"]:
             if b.get("type") != 0:
                 continue
@@ -246,7 +249,7 @@ def parse_pdf(path):
                 bb = line["bbox"]
                 entries.append((bb[1], bb[0], "line", (text, size, bold)))
         entries.sort(key=lambda e: (e[0], e[1]))
-        # 行级合并成段落：同字号、行距 < 1.6×字号、起点 x 一致
+        # 行级合并成段落：同字号、相对字号+粗体+编号三信号分类
         cur = []
         for y0, x0, kind, payload in entries:
             if kind == "table":
@@ -273,6 +276,13 @@ def parse_pdf(path):
                 _push_merged(raw, cur)
                 cur = [(text, size, y0, x0, bold)]
         _push_merged(raw, cur)
+        # OCR 兜底：无文本层的页（扫描件）且有 ocr 扩展时启用；
+        # OCR 不可用则本页产出 0 块（维持「先 OCR」提示行为）
+        if scanned_page:
+            from . import ocr
+            for i, p in enumerate(ocr.page_paras(page), 1):
+                raw.append(("line", (p["text"], 11.0 * p["h_ratio"],
+                                     float(i) * 20, 0.0, False)))
     doc.close()
 
     body_size = _pdf_body_size(raw)

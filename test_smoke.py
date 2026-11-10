@@ -9,6 +9,7 @@
 - 每个断言都对应一条 README 决策记录或一次真实回归缺陷（括号内注明）。
 """
 import os
+import sys
 import zipfile
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from doc2ppt import fix, guard, outline, parse, render, template, verify
 
 ROOT = Path(__file__).resolve().parent
 SAMPLES = ROOT / "samples"
-TPL = ROOT / "templates" / "standard_16x9.pptx"
+TPL = ROOT / "doc2ppt" / "templates" / "standard_16x9.pptx"
 SLOW = pytest.mark.skipif(not os.environ.get("DOC2PPT_SLOW"),
                           reason="端到端用例需 PowerPoint，设置 DOC2PPT_SLOW=1 启用")
 
@@ -220,6 +221,29 @@ def test_notes_are_structured(docx_blocks):
     assert all(len(it.notes) >= 40 for it in items[1:]), "讲稿过短"
 
 
+def test_pdf_scanned_ocr(tmp_path):
+    """扫描版 PDF（无文本层）：有 ocr 扩展则解析出标题与正文；否则跳过"""
+    import pymupdf
+
+    from doc2ppt import ocr
+
+    if not ocr.available():
+        pytest.skip("未安装 ocr 扩展（pip install doc2ppt[ocr]）")
+    src = pymupdf.open(SAMPLES / "sample_plan.pdf")
+    pix = src[0].get_pixmap(dpi=150)
+    out = pymupdf.open()
+    page = out.new_page(width=src[0].rect.width, height=src[0].rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    scanned = tmp_path / "scanned.pdf"
+    out.save(str(scanned))
+
+    blocks = parse.parse_document(scanned)
+    assert blocks, "扫描件未解析出任何内容"
+    assert any(b.block_type == "heading" for b in blocks), "OCR 后标题未被识别"
+    joined = "".join(b.text or "" for b in blocks)
+    assert "企业数据中台" in joined, "OCR 文本与原文不符"
+
+
 def test_pdf_borderless_table(tmp_path):
     """无边框表格能被识别（B6：列对齐 + 多空格分列）"""
     import pymupdf
@@ -370,6 +394,8 @@ def _pixel_diff_ratio(a, b, stride=3, tol=30):
 
 
 @SLOW
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="视觉基线由 PowerPoint 生成，仅在有 COM 的 Windows 上比对")
 @pytest.mark.parametrize("doc_name", ["sample_report.docx", "sample_notes.md", "sample_plan.pdf"])
 def test_visual_baseline(tmp_path, doc_name):
     """三份样例的渲染结果与基线图的像素差异率不超阈值（A1：替代主观人工看图）。
@@ -768,5 +794,7 @@ def test_web_startup_preflight(tmp_path, monkeypatch):
     import server
 
     assert server.main(["--port", "70000"]) == 2
-    monkeypatch.setattr(server, "ROOT", tmp_path)
+    # 模板路径已改为包内资源，patch template_path 才能模拟「缺模板」
+    monkeypatch.setattr(server, "template_path",
+                        lambda: tmp_path / "no_such_template.pptx")
     assert server.main(["--port", "8123"]) == 2

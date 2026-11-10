@@ -226,5 +226,5 @@ def print_slots(infos):
 
 
 def template_path():
-    """默认模板路径。"""
-    return Path(__file__).resolve().parent.parent / "templates" / "standard_16x9.pptx"
+    """默认模板路径（包内资源；源码仓库与 pip 安装均适用）。"""
+    return Path(__file__).resolve().parent / "templates" / "standard_16x9.pptx"

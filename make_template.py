@@ -22,7 +22,7 @@ from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
 ROOT = Path(__file__).resolve().parent
-OUT = ROOT / "templates" / "standard_16x9.pptx"
+OUT = ROOT / "doc2ppt" / "templates" / "standard_16x9.pptx"
 
 FONT_CN = "思源黑体 CN"
 C_DARK = "1F4E79"   # 主色：深蓝（标题/色带）

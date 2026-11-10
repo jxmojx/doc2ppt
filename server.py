@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from doc2ppt import guard
+from doc2ppt.template import template_path
 from run import ROOT, _run_once
 
 SUPPORTED = {".docx", ".pdf", ".md"}
@@ -97,7 +98,7 @@ def convert_upload(doc_name, doc_bytes, tpl_name=None, tpl_bytes=None,
     with tempfile.TemporaryDirectory(prefix="doc2ppt_") as td:
         src = Path(td) / src_name
         src.write_bytes(doc_bytes)
-        tpl = ROOT / "templates" / "standard_16x9.pptx"
+        tpl = template_path()
         if tpl_bytes:
             tpl_path = Path(td) / safe_name(tpl_name or "template.pptx", {".pptx"})
             tpl_path.write_bytes(tpl_bytes)
@@ -315,8 +316,8 @@ def main(argv=None):
     if not 0 <= args.port <= 65535:
         print(f"启动失败: 端口 {args.port} 超出范围（0-65535）", file=sys.stderr)
         return 2
-    if not (ROOT / "templates" / "standard_16x9.pptx").exists():
-        print("启动失败: 缺少默认模板 templates/standard_16x9.pptx", file=sys.stderr)
+    if not template_path().exists():
+        print("启动失败: 缺少默认模板（包内 templates/standard_16x9.pptx）", file=sys.stderr)
         return 2
     try:
         httpd, port, shifted = bind_server(args.host, args.port)

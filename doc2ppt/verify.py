@@ -126,9 +126,9 @@ def check(path, png_dir=None, log=None, status=None):
             if log is not None:
                 log.append("溢出校验: COM 渲染像素实测；标点校验: COM 折行真值")
         elif has_libreoffice():
-            issues.extend(_libreoffice_check(path))
+            issues.extend(_libreoffice_check(path, png_dir=out_dir))
             if log is not None:
-                log.append("溢出校验: LibreOffice 渲染兜底（标点未检查）")
+                log.append("溢出校验: LibreOffice 渲染像素实测（标点未检查）")
             if status is not None:
                 status["degraded"] = True
         else:
@@ -322,19 +322,23 @@ def _com_check(path, out_dir):
         ps1.write_text(_PW_SCRIPT, encoding="utf-8")
         pw, ph = _png_size(path)
         proc = None
-        for _attempt in range(3):  # COM 退出是异步的，偶发 Open 失败时重试
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
-                 "-Pptx", str(Path(path).resolve()), "-PngDir", str(out_dir),
-                 "-JsonOut", str(jout), "-PngW", str(pw), "-PngH", str(ph)],
-                capture_output=True, timeout=300, check=False,
-            )
-            if proc.returncode == 0:
-                break
-            time.sleep(5)
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or b"").decode(errors="replace")[:500]
-            return None, err or "未知错误"
+        try:
+            for _attempt in range(3):  # COM 退出是异步的，偶发 Open 失败时重试
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                     "-Pptx", str(Path(path).resolve()), "-PngDir", str(out_dir),
+                     "-JsonOut", str(jout), "-PngW", str(pw), "-PngH", str(ph)],
+                    capture_output=True, timeout=300, check=False,
+                )
+                if proc.returncode == 0:
+                    break
+                time.sleep(5)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            # Linux/macOS 没有 powershell（或超时）——走 LibreOffice/估算通道
+            return None, f"PowerShell 不可用: {type(e).__name__}"
+        if proc is None or proc.returncode != 0:
+            err = ((proc.stderr or b"") if proc else b"") + ((proc.stdout or b"") if proc else b"")
+            return None, err.decode(errors="replace")[:500] or "未知错误"
         pngs = sorted(out_dir.glob("slide*.png"))
         if not pngs:
             return None, "COM 导出无产物"
@@ -442,20 +446,37 @@ def _is_content_ph(layout_name, sh):
     return _ph_idx(sh) == 1
 
 
-def _libreoffice_check(path):
-    """无头渲染成 PDF 兜底：文本块越过页面边界即报 overflow。"""
+def _libreoffice_check(path, png_dir=None):
+    """LibreOffice 无头渲染兜底：pdf 页光栅化后走与 COM 相同的像素溢出扫描。
+
+    soffice 输出文件名跟随输入名（此前误找 out.pdf，兜底一直静默空转）。
+    标点检查依赖 COM 折行真值，此通道不提供（check 会标 degraded）。
+    """
     soffice = shutil.which("soffice")
+    if soffice is None:
+        return []
     issues = []
     with tempfile.TemporaryDirectory() as td:
-        pdf = Path(td) / "out.pdf"
         proc = subprocess.run(
             [soffice, "--headless", "--convert-to", "pdf", "--outdir", td, str(path)],
             capture_output=True, timeout=180, check=False,
         )
+        pdf = Path(td) / (Path(path).stem + ".pdf")
         if proc.returncode != 0 or not pdf.exists():
             return issues
         doc = pymupdf.open(pdf)
+        target_w, _ph = _png_size(path)
+        out_dir = Path(png_dir) if png_dir else None
+        if out_dir is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        pngs = []
         for i, page in enumerate(doc, 1):
+            zoom = target_w / page.rect.x1
+            pm = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+            png = (out_dir / f"slide{i:02d}.png") if out_dir is not None \
+                else Path(td) / f"slide{i:02d}.png"
+            pm.save(png)
+            pngs.append(png)
             pr = page.rect
             for b in page.get_text("dict")["blocks"]:
                 if b.get("type") != 0:
@@ -466,6 +487,11 @@ def _libreoffice_check(path):
                                         f"文本越出页面边界: {tuple(round(v, 1) for v in b['bbox'])}",
                                         "缩字号 / 拆页"))
         doc.close()
+        for m in _pixel_overflow(path, pngs):
+            issues.append(Issue(m["page"], m["name"], "overflow", "high",
+                                f"渲染实测文本底 {m['max_row_pt']:.0f}pt > 框底 "
+                                f"{m['bottom_pt']:.0f}pt（溢出 {m['spill_pt']:.0f}pt）",
+                                "缩字号 / 拆页 / 精简文本"))
     return issues
 
 

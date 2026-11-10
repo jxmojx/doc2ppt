@@ -22,8 +22,8 @@ def main(argv=None):
         description="文档转 PPT：docx / pdf（有文本层）/ md → 可编辑 .pptx",
     )
     ap.add_argument("doc", nargs="?", help="输入文档路径（.docx / .pdf / .md）")
-    ap.add_argument("-t", "--template", default=str(ROOT / "templates" / "standard_16x9.pptx"),
-                    help="模板 pptx 路径（默认 templates/standard_16x9.pptx）")
+    ap.add_argument("-t", "--template", default=str(template.template_path()),
+                    help="模板 pptx 路径（默认包内 standard_16x9.pptx）")
     ap.add_argument("-o", "--output", default=None, help="输出 pptx 路径（默认 <文档名>.pptx）")
     ap.add_argument("--pages", type=int, default=8,
                     help="期望总页数（含封面，默认 8；与自然页数差距过大时忽略）")

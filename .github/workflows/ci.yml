@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  # 快测：不依赖办公软件；COM 端到端用例（DOC2PPT_SLOW 未设）自动跳过
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装依赖
+        run: pip install -r requirements.txt pytest
+      - name: 快测
+        run: python -m pytest test_smoke.py -q
+
+  # 全量：Linux + LibreOffice 无头渲染通道（像素溢出扫描复用 COM 同一套）
+  linux-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装 LibreOffice 与中文字体
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-impress fonts-noto-cjk
+      - name: 安装依赖（含 OCR 扩展）
+        run: pip install -r requirements.txt pytest rapidocr-onnxruntime
+      - name: 全量测试（LibreOffice 通道）
+        env:
+          DOC2PPT_SLOW: "1"
+        run: python -m pytest test_smoke.py -q

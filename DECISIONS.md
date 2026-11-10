@@ -1,6 +1,6 @@
 # 实现决策记录
 
-doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记录（共 168 条）。
+doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记录（共 172 条）。
 项目介绍与使用方式见 [README.md](README.md)。
 
 ## 里程碑进度
@@ -257,3 +257,7 @@ doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记
 166. **README 精简**：README 只保留项目介绍、特性、快速开始、工作方式、结构、测试与限制；原 165 条实现决策与里程碑移入本文件，避免 README 变成开发日志。当前 **23 个文件**（20 个源码与资源 + `.gitignore` / `.gitattributes` + 本文件）。
 167. **开源许可证**：仓库公开后补充 MIT LICENSE（版权人 jxmojx，2026），README 增加 License 段与结构条目。当前 **24 个文件**；代码未改，测试状态不变。
 168. **Agent Skill 封装**：新增 `skill/doc2ppt/SKILL.md`（Agent Skills 兼容格式），把「输入文章 → 输出 PPT」交给 Agent 编排：环境自检 → 粘贴文本补标题结构成 md → `run.py` 转换 → 按问题数/预览验收。管线代码零改动，仅文档层封装。演练：一篇 4 节短文 → 5 页 0 问题，表格正确保留（单位混排不出图，符合边界）。当前 **25 个文件**。
+169. **pip 打包**：模板移入包内（`doc2ppt/templates/`），新增 `pyproject.toml`（setuptools、package-data 随包分发、入口 `doc2ppt` / `doc2ppt-server`，OCR 为可选扩展 `[ocr]`）。CLI/Web/测试全部改走 `template.template_path()`。验收：干净 venv `pip install <仓库>` 后 `doc2ppt` 命令真跑 12 页 0 问题。`uvx --from git+…` 同理可用。
+170. **LibreOffice 兜底成熟化（修两处真 bug）**：① `_libreoffice_check` 找 `out.pdf`，而 soffice 实际输出 `<输入名>.pdf`——兜底通道此前一直**静默空转**，报「0 问题」毫无检测力；② `_com_check` 在无 PowerShell 的机器上抛 `FileNotFoundError` 直接崩溃。修复后 soffice→pdf→按页光栅化 PNG，**复用与 COM 完全相同的 `_pixel_overflow` 像素扫描**，并把预览 PNG 同步导出到 png_dir（预览体验与 COM 一致）；标点检查仍为 COM 专属（无真值通道），降级显式标记。Linux 全量验证由 CI `linux-full` 任务承担。
+171. **GitHub Actions CI**：`fast`（ubuntu + py3.13，31 用例，COM 用例自动跳过）+ `linux-full`（ubuntu + LibreOffice + 思源/Noto CJK 字体 + OCR 扩展，`DOC2PPT_SLOW=1` 全量）。视觉基线测试加 `skipif(sys.platform != "win32")`——基线由 PowerPoint 生成，LibreOffice 渲染像素不同，比对无意义。
+172. **OCR 扩展（可选依赖）**：`doc2ppt[ocr]`（rapidocr-onnxruntime）。无文本层的 PDF 页走 OCR：200dpi 光栅化 → rapidocr → 行→段落聚合（间隙 <0.9×中位行高且水平重叠）→ **首行高/中位行高做字号代理**（整段高会把多行段误判成标题）→ 复用 pdf 分类三信号（相对字号+编号模式）。两个坑：rapidocr 置信度是**字符串**需 `float()`；扫描页的整页大图只是扫描容器，不作为插图输出。实测：样例第 1 页渲染成图-only PDF 后，34s 解析出标题（比率 1.69/1.79 识别为标题）与正文，文本与原文一致；未装扩展时维持「先 OCR」提示。新增夹具测试（无扩展自动 skip）。全量 **38 passed**。
