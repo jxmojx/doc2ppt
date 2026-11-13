@@ -92,16 +92,44 @@ def render(items, template_path, out_path, warnings=None):
     font, warn = pick_font()
     if warn:
         warnings.append(warn)
-    for item in items:
+    total = len(items)
+    for i, item in enumerate(items, 1):
         sem = pick_layout(item)
         info = infos.get(sem) or infos["content"]
         slide = prs.slides.add_slide(info.layout)
         _fill_slide(slide, item, sem, info, font, warnings)
         _fill_notes(slide, item)
+        # 页脚信息条：封面为「日期 · 共 N 页」，内容页为页码——交付即用，无需手补
+        stamp = f"{_today_cn()} · 共 {total} 页" if i == 1 else f"{i} / {total}"
+        _add_stamp(slide, prs.slide_width, prs.slide_height, stamp, font)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     prs.save(out)
     return warnings
+
+
+def _today_cn():
+    import datetime
+
+    d = datetime.date.today()
+    return f"{d.year} 年 {d.month} 月"
+
+
+def _add_stamp(slide, slide_w, slide_h, text, font):
+    """右下角信息条（10.5pt 灰字，右对齐；放在正文槽之下，不与内容重叠）。"""
+    w_in, h_in = 1.6, 0.3
+    box = slide.shapes.add_textbox(
+        Emu(int((slide_w / 914400 - 0.8 - w_in) * 914400)),
+        Emu(int((slide_h / 914400 - 0.40) * 914400)),
+        Emu(int(w_in * 914400)), Emu(int(h_in * 914400)))
+    tf = box.text_frame
+    tf.word_wrap = False
+    box.name = "doc2ppt_stamp"  # verify 对 doc2ppt_* 自绘形状豁免字号/扫描
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    para = tf.paragraphs[0]
+    run = para.add_run()
+    _set_run_text(para, run, text, 10.5, False, C_CAPT, font)
+    para._p.get_or_add_pPr().set("algn", "r")
 
 
 def _ph(slide, idx):
@@ -157,11 +185,14 @@ def _fill_content_slide(slide, item, sem, info, font):
 
 
 def _balance_short_page(body, item, size, info):
-    """内容明显不足时：垂直居中 + 加大段间距填充版面。
+    """内容明显不足时：段距填充 /  statement 页居中（见 _balance_blocks）。
 
-    字号必须全篇统一（否则翻页跳变），所以用行间留白来平衡短页的空旷感。
+    与页标题重复的小标题渲染时会被跳过，估算前先剔除，否则高度虚高
+    会把该居中的页顶在阈值之上（视觉验收实测 slide02 顶置 fail）。
     """
-    _balance_blocks(body, item.blocks, size, info)
+    blocks = [b for b in item.blocks
+              if not (b.block_type == "heading" and _same_title(b.text, item.title))]
+    _balance_blocks(body, blocks, size, info)
 
 
 def _place_images(slide, item, info, size):
@@ -204,7 +235,11 @@ def _place_images(slide, item, info, size):
 
 
 def _balance_blocks(body, blocks, size, info):
-    """按给定块集合做短内容平衡（双栏时传本栏块）。"""
+    """按给定块集合做短内容平衡（双栏时传本栏块）。
+
+    顶对齐 + 段间距填充：不用垂直居中——居中会让正文悬在页中、
+    标题下出现大片空白带（视觉验收实测被判定 fail）。
+    """
     from . import verify as verify_mod
 
     spec = info.slots.get("body")
@@ -213,15 +248,19 @@ def _balance_blocks(body, blocks, size, info):
     need = verify_mod.estimate_body_need(blocks, size, spec.w, spec.h)
     if need >= 0.6 * spec.h * 72:
         return
-    body.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
     paras = [p for p in body.text_frame.paragraphs if "".join(r.text for r in p.runs).strip()]
     if len(paras) < 2:
         return
-    extra_pt = (0.82 * spec.h * 72 - need) / (len(paras) - 1)
-    extra_pt = max(0.0, min(extra_pt, size * 2.0))  # 段距上限 2 倍字号（尾页可更松散）
+    # 目标：段距填充到约 72% 版心；填充后仍 <55% 的极稀疏页改垂直居中（statement 页），
+    # 避免底部整片空白（视觉验收对「下坠悬中」与「底部空洞」都判 fail）。
+    extra_pt = (0.72 * spec.h * 72 - need) / max(len(paras) - 1, 1)
+    extra_pt = max(0.0, min(extra_pt, size * 2.0))  # 段距上限 2 倍字号
     if extra_pt >= 2:
         for p in paras:
             p.space_after = Pt(extra_pt)
+    fill_after = need + extra_pt * (len(paras) - 1)
+    if fill_after < 0.55 * spec.h * 72:
+        body.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
 
 
 def _split_blocks(blocks, size=None, width=None, title=None):
@@ -446,8 +485,8 @@ def _fill_chart_slide(slide, item, info, font, warnings):
             run = para.add_run()
             _set_run_text(para, run, seg, seg_pt, False, C_BODY, font)
         top = Emu(int(top + intro_h + int(0.12 * 914400)))  # 与表格留出呼吸区，避免边缘叠压
-    # 数据页且可数值化 → 出原生图表（可在 PowerPoint 里编辑数据）；
-    # 导语很短时仍可出图（文字在上、图表在下），导语较长则保持表格
+    # 数据页且可数值化 → 出原生图表或表格；记录内容块左缘/宽度，供注脚随块对齐
+    block_left, block_w = int(content_ph.left), int(content_ph.width)  # 图表占满版心
     chart_spec = _chart_spec(headers, rows) if len(intro) <= 150 else None
     if chart_spec is not None:
         chart_h = max(int(2.6 * 914400),
@@ -463,6 +502,7 @@ def _fill_chart_slide(slide, item, info, font, warnings):
         content_ph._element.getparent().remove(content_ph._element)
         n_rows, n_cols = len(rows) + 1, len(headers)
         left = content_ph.left + Emu(int((content_ph.width - table_w) / 2))
+        block_left, block_w = int(left), int(table_w)  # 表格居中时注脚随块对齐
         gf = slide.shapes.add_table(n_rows, n_cols, Emu(int(left)), Emu(int(top)),
                                     Emu(table_w), Emu(table_h))
         table = gf.table
@@ -473,23 +513,27 @@ def _fill_chart_slide(slide, item, info, font, warnings):
             cell.fill.solid()
             cell.fill.fore_color.rgb = RGBColor.from_string(C_HEAD)
         for i, row in enumerate(rows):
-            zebra = i % 2 == 1  # 隔行浅底，长表格更易横向读数
+            zebra = i % 2 == 1  # 隔行浅底，长表格页更易横向读数
             for j in range(min(len(row), n_cols)):
                 cell = table.cell(i + 1, j)
                 _set_cell(cell, row[j], font, size=cell_pt)
                 if zebra:
                     cell.fill.solid()
                     cell.fill.fore_color.rgb = RGBColor.from_string(C_ZEBRA)
+        # graphic frame 的高度不会拉伸行；逐行等比放大到目标高度，消除表格页底部空白带
+        total_h = sum(r.height for r in table.rows) or 1
+        for r_ in table.rows:
+            r_.height = Emu(max(int(r_.height * table_h / total_h), 0.18 * 914400))
     cap = _ph(slide, info.idx("caption"))
     if cap is None:
         # 模板没有脚注槽：来源注写进演讲者备注，不阻塞出片
         warnings.append(f"第{item.page_no}页: 模板无脚注槽，数据来源写入备注")
         return
     table_bottom = int(top) + table_h
-    # 四边全设：单独设 top 会让占位符丢掉继承的宽/左（变 0 宽，文字逐字换行）
-    cap.left = Emu(int(content_ph.left))
-    cap.width = Emu(int(content_ph.width))
-    cap.top = Emu(table_bottom + int(0.08 * 914400))  # 来源注紧随表格，不留大段空白
+    # 注脚与内容块（表格/图表）左缘对齐：表格居中时注脚不再孤悬最左；四边全设防继承丢失
+    cap.left = Emu(int(block_left))
+    cap.width = Emu(int(block_w))
+    cap.top = Emu(table_bottom + int(0.08 * 914400))  # 来源注紧随内容块，不留大段空白
     cap.height = Emu(int(0.45 * 914400))
     _set_para(cap, source or "数据来源：原文表格", 12, C_CAPT, font=font)
 
@@ -609,6 +653,36 @@ def _table_height(headers, rows, widths_in, pt):
         total += row_h(list(r) + [""] * (len(headers) - len(r)))
     return total
 
+PARA_SPLIT_LEN = 60  # 普通段落超过该长度且有 ≥2 句即按句拆行（幻灯片化，逐句原样保留）
+
+
+def _sentences(text):
+    """按句读切分（。！？；），碎句并入前句，避免孤字行。"""
+    parts = re.findall(r"[^。！？；]*[。！？；]|[^。！？；]+$", text)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if out and len(p) < 8:
+            out[-1] += p
+        else:
+            out.append(p)
+    return out
+
+
+def display_texts(block):
+    """块 → 渲染段落文本列表。长普通段按句拆成多行，让正文页呈现条目感
+    而不是大段文字墙（逐句原样保留，不改写不删字）。
+    fix._body_blocks 与 verify.estimate_body_need 必须与此函数同口径，
+    否则标点修复会打错段落、容量估算会低估。"""
+    if block.block_type == "para" and len(block.text) > PARA_SPLIT_LEN:
+        parts = _sentences(block.text)
+        if len(parts) >= 2:
+            return parts
+    return [block.text]
+
+
 def _fill_body(ph, blocks, size, font, title=None):
     """填充正文：与页标题重复的小标题不渲染；小节标题去项目符号、加前间距
     （buNone + spcBef），与列表项形成层级；列表项不加「•」前缀（PowerPoint
@@ -624,43 +698,45 @@ def _fill_body(ph, blocks, size, font, title=None):
         if b.block_type == "heading":
             if title and _same_title(b.text, title):
                 continue  # 与页标题重复的小标题不重复渲染（忽略编号差异）
-            text, bold, color = b.text, True, C_TITLE
+            _text, bold, color = b.text, True, C_TITLE
         elif b.block_type == "bullet":
-            text, bold, color = b.text, False, C_BODY
+            _text, bold, color = b.text, False, C_BODY
         else:
-            text, bold, color = b.text, False, C_BODY
-        para = tf.paragraphs[0] if first else tf.add_paragraph()
-        first = False
-        para.text = ""
-        run = para.add_run()
-        para_size = b.meta.get("size") or size  # 块级字号覆盖（修复环针对个别段微调）
-        _set_run_text(para, run, text, para_size, bold, color, font)
-        if b.block_type != "heading":
-            # 顶格：首行与续行同容量（消除悬挂缩进导致的孤标点折行），模拟器方可精确复现
-            pPr = para._p.get_or_add_pPr()
-            pPr.set("marL", "0")
-            pPr.set("indent", "0")
-            mar_r = b.meta.get("marR")
-            if mar_r:
-                pPr.set("marR", str(int(mar_r)))  # 标点修复的右缩进微调
-        if b.block_type == "heading":
-            pPr = para._p.get_or_add_pPr()
-            if pPr.find(qn("a:buNone")) is None:
-                pPr.append(parse_xml(
-                    '<a:buNone xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
-                ))
-            if pPr.find(qn("a:spcBef")) is None:
-                pPr.insert(0, parse_xml(
-                    '<a:spcBef xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-                    '<a:spcPts val="600"/></a:spcBef>'
-                ))
-        elif b.block_type == "para":
-            # 普通段落不带项目符号（占位符默认带圆点，只留给列表项）
-            pPr = para._p.get_or_add_pPr()
-            if pPr.find(qn("a:buNone")) is None:
-                pPr.append(parse_xml(
-                    '<a:buNone xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
-                ))
+            _text, bold, color = b.text, False, C_BODY
+        segs = display_texts(b)
+        for seg in segs:
+            para = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            para.text = ""
+            run = para.add_run()
+            para_size = b.meta.get("size") or size  # 块级字号覆盖（修复环针对个别段微调）
+            _set_run_text(para, run, seg, para_size, bold, color, font)
+            if b.block_type != "heading":
+                # 顶格：首行与续行同容量（消除悬挂缩进导致的孤标点折行），模拟器方可精确复现
+                pPr = para._p.get_or_add_pPr()
+                pPr.set("marL", "0")
+                pPr.set("indent", "0")
+                mar_r = b.meta.get("marR")
+                if mar_r:
+                    pPr.set("marR", str(int(mar_r)))  # 标点修复的右缩进微调
+            if b.block_type == "heading":
+                pPr = para._p.get_or_add_pPr()
+                if pPr.find(qn("a:buNone")) is None:
+                    pPr.append(parse_xml(
+                        '<a:buNone xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
+                    ))
+                if pPr.find(qn("a:spcBef")) is None:
+                    pPr.insert(0, parse_xml(
+                        '<a:spcBef xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                        '<a:spcPts val="600"/></a:spcBef>'
+                    ))
+            elif b.block_type == "para" and len(segs) == 1:
+                # 单段普通文字不带项目符号；拆成多条的段落改用与列表一致的圆点
+                pPr = para._p.get_or_add_pPr()
+                if pPr.find(qn("a:buNone")) is None:
+                    pPr.append(parse_xml(
+                        '<a:buNone xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>'
+                    ))
 
 
 def _style_run(run, size, bold, color, font):

@@ -92,16 +92,16 @@ def _outline_rules(blocks, page_target, doc_name, max_chars=None, body_box=None)
         pages = [("目录", flat, "", "")]
     items = [OutlineItem(
         page_no=1, title=doc_title,
-        thesis=f"由《{doc_name or doc_title}》自动生成 · 共 {len(pages) + 1} 页",
+        thesis=_cover_thesis(body, doc_name, doc_title),
         notes=_rule_notes(doc_title),
     )]
     for title, pblocks, chap, intro in pages:
         has_table = any(b.block_type == "table" for b in pblocks)
         if intro:
-            thesis = intro + "\n" + _table_source(doc_name)
+            thesis = intro + "\n" + _table_source(doc_title or doc_name)
         elif has_table:
             # 正文+表格同页：来源注仍要落地（渲染层据此填脚注）
-            thesis = _first_sentence(pblocks) + "\n" + _table_source(doc_name)
+            thesis = _first_sentence(pblocks) + "\n" + _table_source(doc_title or doc_name)
         else:
             thesis = _first_sentence(pblocks)
         items.append(OutlineItem(
@@ -499,6 +499,21 @@ def _table_source(doc_name):
     return f"数据来源：{doc_name}" if doc_name else "数据来源：原文档"
 
 
+def _cover_thesis(blocks, doc_name, doc_title):
+    """封面副标题 = 正文首句摘要钩子（≤40 字，原文可追溯）。
+
+    「由《xx》自动生成」的机翻感副标题是用户拿到手必改的一处；正文首句
+    摘要在断网规则版也能给出得体的封面。正文完全为空才回退旧文案。
+    """
+    hook = _first_sentence(blocks)
+    if hook:
+        hook = hook.strip()
+        if len(hook) > 40:
+            hook = hook[:39] + "…"
+        return hook
+    return f"由《{doc_name or doc_title}》自动生成"
+
+
 def _first_sentence(blocks):
     for b in blocks:
         if b.block_type in ("para", "bullet") and b.text:
@@ -888,7 +903,7 @@ def _assemble_llm_items(pages, blocks, doc_title, doc_name, max_chars, body_box,
                     for p in pages if p.get("blocks")}
     items = [OutlineItem(
         page_no=1, title=doc_title,
-        thesis=f"由《{doc_name or doc_title}》自动生成 · 共 {len(tuples) + 1} 页（LLM 大纲）",
+        thesis=f"{_cover_thesis(blocks, doc_name, doc_title)}（LLM 大纲）",
         chapter="", notes="",
     )]
     for title, pblocks, _chap, _intro in tuples:

@@ -87,6 +87,7 @@ def run(items, template_path, out_path, png_dir=None, stats=None):
     rnd = 0
     per_round = []
     status = {}
+    _escalate_sparse_pages(items, box.get("content", (12.0, 5.6)))
     for rnd in range(1, MAX_ROUNDS + 1):
         render_mod.render(items, template_path, out_path, warnings=log)
         issues = verify_mod.check(out_path, log=log, status=status)
@@ -290,16 +291,58 @@ def _fix_punct_orphan(item, issues, applied, page_no, box=None, box2=None):
         applied.append(f"p{page_no} 标点避头尾（该段字号 -1pt）×{fixed}")
 
 
+def _escalate_sparse_pages(items, body_box):
+    """稀疏页字号抬升：内容不足 50% 版心的页逐级加大字号（上限 28pt）。
+
+    三句话的页面无论怎么加段距都填不满 16:9 展示型页面（100pt 段距是设计灾难），
+    专业做法是 statement 页：字号抬升 + 居中。字号写在 item.font_size 上，
+    渲染/估算/标点修复自然同口径。**优先选「每个条目单行放下」的字号**——
+    折行悬挂短行（如「过 100%。」）是视觉验收明确判 fail 的机器痕迹。
+    """
+    from . import verify as verify_mod
+
+    w, h = body_box or (12.0, 5.6)
+    for it in items[1:]:  # 封面不抬
+        if any(b.block_type in ("table", "image") for b in it.blocks):
+            continue
+        content_blocks = [b for b in it.blocks if b.text.strip()]
+        if not content_blocks:
+            continue
+        base = it.font_size or 16
+        need = verify_mod.estimate_body_need(content_blocks, base, w, h)
+        if need > 0.50 * h * 72:
+            continue
+        texts = [t for b in content_blocks for t in render_mod.display_texts(b)]
+        chosen, fallback = None, None
+        for s in (28, 26, 24, 22):  # 自大而小：优先保住「每条目单行」，避免折行悬挂短行
+            if s <= base:
+                continue
+            est = verify_mod.estimate_body_need(content_blocks, s, w, h)
+            if est > 0.70 * h * 72:
+                continue
+            if all(verify_mod.fits_one_line(t, s, w) for t in texts):
+                chosen = s
+                break
+            fallback = fallback or s
+        if chosen or fallback:
+            it.font_size = chosen or fallback
+
+
 def _body_blocks(item):
     """与 render._fill_body 同口径的正文块（跳过表格、图片、与页标题重复的小标题）。
 
     必须复用 render 的标题等价判断（忽略编号），否则段落索引会错位、修复打偏。
+    长段落按 render.display_texts 拆成多个渲染段，索引按渲染段对齐
+    （同一块重复出现，meta 修改作用于整块，与渲染逐段共用 meta 一致）。
     """
-    return [b for b in item.blocks
-            if b.block_type not in ("table", "image")
-            and b.text.strip()
-            and not (b.block_type == "heading"
-                     and render_mod._same_title(b.text, item.title))]
+    out = []
+    for b in item.blocks:
+        if b.block_type in ("table", "image") or not b.text.strip():
+            continue
+        if b.block_type == "heading" and render_mod._same_title(b.text, item.title):
+            continue
+        out.extend([b] * len(render_mod.display_texts(b)))
+    return out
 
 
 def _needed_size(item, box=None, box2=None):

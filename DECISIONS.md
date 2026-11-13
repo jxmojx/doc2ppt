@@ -1,6 +1,6 @@
 # 实现决策记录
 
-doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记录（共 173 条）。
+doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记录（共 175 条）。
 项目介绍与使用方式见 [README.md](README.md)。
 
 ## 里程碑进度
@@ -262,3 +262,5 @@ doc2ppt 开发过程中的里程碑、关键取舍与踩坑，按时间顺序记
 171. **GitHub Actions CI**：`fast`（ubuntu + py3.13，31 用例，COM 用例自动跳过）+ `linux-full`（ubuntu + LibreOffice + 思源/Noto CJK 字体 + OCR 扩展，`DOC2PPT_SLOW=1` 全量）。视觉基线测试加 `skipif(sys.platform != "win32")`——基线由 PowerPoint 生成，LibreOffice 渲染像素不同，比对无意义。
 172. **OCR 扩展（可选依赖）**：`doc2ppt[ocr]`（rapidocr-onnxruntime）。无文本层的 PDF 页走 OCR：200dpi 光栅化 → rapidocr → 行→段落聚合（间隙 <0.9×中位行高且水平重叠）→ **首行高/中位行高做字号代理**（整段高会把多行段误判成标题）→ 复用 pdf 分类三信号（相对字号+编号模式）。两个坑：rapidocr 置信度是**字符串**需 `float()`；扫描页的整页大图只是扫描容器，不作为插图输出。实测：样例第 1 页渲染成图-only PDF 后，34s 解析出标题（比率 1.69/1.79 识别为标题）与正文，文本与原文一致；未装扩展时维持「先 OCR」提示。新增夹具测试（无扩展自动 skip）。全量 **38 passed**。
 173. **CI 通道字体跨平台化**：CI 首跑 linux-full 34 passed，唯一失败 `test_pdf_borderless_table` 硬编码 `C:/Windows/Fonts/msyh.ttc`（ubuntu 无此文件）；改为「有 msyh 用 msyh，否则 pymupdf 内置 `china-s`」。同时发现并移除误提交的生成物 `samples/sample_report.pptx`（gitignore 补 `samples/*.pptx`）。
+174. **零修改交付（封面/条目化/页码）**：目标「skill 产出 PPT 无需人工排版」。三项改动：① 封面副标题从「由《xx》自动生成」换成正文首句摘要钩子（≤40 字，原文可追溯；LLM 版保留「（LLM 大纲）」溯源标记）；渲染加右下角「YYYY 年 M 月 · 共 N 页」戳，内容页页码「n / N」。② 长普通段（>60 字且 ≥2 句）在渲染层按句拆行（`display_texts`，逐句原样不改写），`fix._body_blocks` 与 `verify.estimate_body_need` 同口径扩展，否则标点修复索引错位/容量低估。③ 短页平衡从垂直居中改为顶对齐+段距填充；表格行高按目标逐行等比拉伸（graphic frame 高度不拉伸行）；来源注改用文档标题并与表格左缘对齐。连带修复三个被放大暴露的真问题：**段间距是绝对 6pt 不是 em**（COM 墨迹底反推标定，旧常数在小字号低估，条目化后雪崩缩字号/拆页 64 页）、**页脚戳墨迹污染扫描窗**（doc2ppt_stamp 按 x 列剔除且不作天花板）、**导语被误排天花板**（doc2ppt_intro 恢复普通形状，否则标题扫描窗漏进导语墨迹）。
+175. **视觉验收闭环（6 轮，全部通过）**：启用视觉代理逐页裁决（此前 provider 不可用，本轮恢复）。第 1 轮揪出三类机器痕迹：文字墙（拆行阈值 110→60）、来源注暴露文件名（改文档标题）、稀疏页填充不足。迭代出两条排版策略：**稀疏页字号抬升**（≤50% 版心的页自大而小选「每条目单行」字号，上限 28pt，折行悬挂短行是明确 fail 项）与**填充后 <55% 版心则垂直居中**（statement 页）。过程中抓出两个经典 bug：抬升结果被循环外 fallback 覆盖（break-then-overwrite）、居中阈值被「重复标题计入高度」顶穿（估算前剔除）。第 6 轮 5/5 全部通过，评语「无残留需人工修改项」。三样例与 dry-run 文章均 0 问题；全量 **39 passed**；基线重建。

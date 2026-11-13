@@ -27,7 +27,7 @@ from .template import LAYOUT_MAP
 BODY_MIN = 14.0
 TITLE_MIN = 24.0
 LINE_H = 1.25     # 实测校准：微软雅黑换行渲染行距 ≈1.22em，取 1.25 留余量
-PARA_EXTRA = 0.2  # 实测校准：占位符段落间额外间距 ≈0.18em
+PARA_EXTRA_PT = 6.0  # 实测校准（COM 墨迹底反推）：模板段落的段间距是绝对值 ~6pt（spcBef 600），与字号无关；用 em 表示会在小字号时低估
 MARGIN_PT = 12.0  # 文本框左右内边距合计
 BOTTOM_SLACK = 3.0
 CLOSING_PUNCT = "，。、；：！？）」』】》〉”’"
@@ -153,6 +153,8 @@ def _check_static(path):
         has_graphic = any(sh.has_table or getattr(sh, "has_chart", False)
                           for sh in slide.shapes)
         for sh in slide.shapes:
+            if sh.name.startswith("doc2ppt_"):  # 页脚戳/导语等自绘形状，不属于版式内容
+                continue
             if sh.has_table or not sh.has_text_frame:
                 continue
             if not sh.text_frame.text.strip():
@@ -243,6 +245,8 @@ def _check_estimate(path):
     issues = []
     for i, slide in enumerate(prs.slides, 1):
         for sh in slide.shapes:
+            if sh.name.startswith("doc2ppt_"):  # 页脚戳/导语等自绘形状，不属于版式内容
+                continue
             if sh.has_table or not sh.has_text_frame or not sh.text_frame.text.strip():
                 continue
             sizes = [r.font.size.pt for p in sh.text_frame.paragraphs for r in p.runs
@@ -262,21 +266,35 @@ def _check_estimate(path):
     return issues
 
 
+def fits_one_line(text, size, w_in):
+    """该文本在给定字号与版心宽度下是否单行放下（用于稀疏页字号抬升的折行预防）。"""
+    _name, font_file, _warn = render_mod.resolve_font()
+    font = _load_font(font_file)
+    w_pt = max(w_in * 72 - MARGIN_PT, 10)
+    width = (font.text_length(text, fontsize=size) if font
+             else sum(size if ord(ch) >= 0x2E80 else 0.55 * size for ch in text))
+    return width <= w_pt
+
+
 def estimate_body_need(blocks, size, w_in, h_in):
-    """给 fix / outline 用的解析式估算：返回所需高度(pt)。"""
+    """给 fix / outline 用的解析式估算：返回所需高度(pt)。
+
+    与渲染同口径：长普通段按 display_texts 拆成多个渲染段（每段独立段距），
+    否则会低估高度、导致首页溢出后修复环频繁缩字号。
+    """
     _name, font_file, _warn = render_mod.resolve_font()
     font = _load_font(font_file)
     w_pt = max(w_in * 72 - MARGIN_PT, 10)
     lines, paras = 0, 0
     for b in blocks:
-        text = b.text
-        if not text:
-            continue
-        width = (font.text_length(text, fontsize=size) if font
-                 else sum(size if ord(ch) >= 0x2E80 else 0.55 * size for ch in text))
-        lines += max(1, math.ceil(width / w_pt))
-        paras += 1
-    return lines * size * LINE_H + max(paras - 1, 0) * size * PARA_EXTRA
+        for text in render_mod.display_texts(b):
+            if not text:
+                continue
+            width = (font.text_length(text, fontsize=size) if font
+                     else sum(size if ord(ch) >= 0x2E80 else 0.55 * size for ch in text))
+            lines += max(1, math.ceil(width / w_pt))
+            paras += 1
+    return lines * size * LINE_H + max(paras - 1, 0) * PARA_EXTRA_PT
 
 
 def _load_font(font_file):
@@ -301,7 +319,7 @@ def _metrics_need(text_frame, size, w_pt, font):
                  else sum(size if ord(ch) >= 0x2E80 else 0.55 * size for ch in text))
         lines += max(1, math.ceil(width / max(w_pt, 10)))
         paras += 1
-    return lines * size * LINE_H + max(paras - 1, 0) * size * PARA_EXTRA
+    return lines * size * LINE_H + max(paras - 1, 0) * PARA_EXTRA_PT
 
 
 def _png_size(path):
@@ -361,7 +379,12 @@ def _pixel_overflow(path, pngs):
         pm = doc[0].get_pixmap(dpi=96)
         scale = pm.width / slide_w_pt  # px per pt（正方形像素，纵横同一比例）
         rects = []
+        stamp_lefts = []  # doc2ppt_stamp（页脚戳）的左缘：扫描列需避开，防戳墨迹混入
         for sh in slide.shapes:
+            if sh.name == "doc2ppt_stamp":
+                stamp_lefts.append(sh.left / 914400 * 72)
+                continue  # 页脚戳不参与扫描、不作天花板（其墨迹在框底+24pt 窗内）
+            # doc2ppt_intro（表格页导语）保持普通形状：参与扫描并充当上方标题的天花板
             # 表格/图片/图表计入 ceiling（其墨迹会干扰上方文字扫描），但自身不参与扫描
             is_pic = getattr(sh, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE
             is_graphic = sh.has_table or is_pic or getattr(sh, "has_chart", False)
@@ -387,6 +410,10 @@ def _pixel_overflow(path, pngs):
                     ceiling = min(ceiling, o["top"] - 2)
             x0 = int((r["left"] + 7) * scale)
             x1 = min(int((r["right"] - 7) * scale), pm.width - 1)
+            # 页脚戳墨迹在框底+24pt 的扫描窗内，按 x 列排除其覆盖区间
+            for sl_pt in stamp_lefts:
+                if r["left"] + 7 < sl_pt - 4 < r["right"] - 7:
+                    x1 = min(x1, int((sl_pt - 4) * scale))
             y0 = int(r["top"] * scale)
             y1 = min(int(ceiling * scale), pm.height - 1)
             if x1 <= x0:

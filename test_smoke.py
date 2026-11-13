@@ -221,6 +221,40 @@ def test_notes_are_structured(docx_blocks):
     assert all(len(it.notes) >= 40 for it in items[1:]), "讲稿过短"
 
 
+def test_display_texts_and_zero_touch(docx_blocks, tmp_path):
+    """零修改目标：封面摘要钩子、长段按句条目化、页码条（交付即用）"""
+    import re as _re
+
+    from doc2ppt.models import Block
+    from doc2ppt.render import display_texts
+
+    # 长段条目化：逐句原样保留
+    long_text = "这一段用来验证长段落会按句读切分成多条展示。" * 6
+    b = Block("para", long_text)
+    parts = display_texts(b)
+    assert len(parts) >= 2, "长段未被条目化"
+    assert "".join(parts) == long_text, "切分丢字或改写"
+
+    # 封面副标题 = 正文首句钩子（不再是「由《xx》自动生成」）
+    items = outline.build_outline(docx_blocks, page_target=8, doc_name="r.docx",
+                                  max_chars=575, body_box=(12.0, 5.6))
+    assert "自动生成" not in items[0].thesis
+    assert len(items[0].thesis) <= 42
+
+    # 页脚信息条:封面「日期 · 共 N 页」，内容页「n / N」
+    out = tmp_path / "zero.pptx"
+    render.render(items, TPL, out)
+    prs = Presentation(str(out))
+
+    def _slide_texts(sl):
+        return [sh.text_frame.text for sh in sl.shapes if sh.has_text_frame]
+
+    t1 = "\n".join(_slide_texts(prs.slides[0]))
+    assert _re.search(r"\d{4} 年 \d+ 月 · 共 \d+ 页", t1), f"封面缺日期页数条: {t1[-40:]}"
+    t2 = "\n".join(_slide_texts(prs.slides[1]))
+    assert "2 / " in t2 and f"/ {len(items)}" in t2, f"内容页缺页码: {t2[-40:]}"
+
+
 def test_pdf_scanned_ocr(tmp_path):
     """扫描版 PDF（无文本层）：有 ocr 扩展则解析出标题与正文；否则跳过"""
     import pymupdf
