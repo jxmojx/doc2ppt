@@ -657,7 +657,11 @@ PARA_SPLIT_LEN = 60  # 普通段落超过该长度且有 ≥2 句即按句拆行
 
 
 def _sentences(text):
-    """按句读切分（。！？；），碎句并入前句，避免孤字行。"""
+    """按句读切分（。！？；），碎句并入前句，避免孤字行。
+
+    长单句（无句读）需降级到逗号分句：`_clauses` 已做兜底；这里只负责
+    句读切割，切不出来就整段返回（由上一层决定是否用逗号分句）。
+    """
     parts = re.findall(r"[^。！？；]*[。！？；]|[^。！？；]+$", text)
     out = []
     for p in parts:
@@ -668,16 +672,59 @@ def _sentences(text):
             out[-1] += p
         else:
             out.append(p)
-    return out
+    return out if len(out) >= 2 else [text]
+
+
+def _clauses(text):
+    """长单句（>60 字且无句读）按逗号/顿号分级切行，短碎片并入前句。
+
+    `_sentences` 对只有逗号、没有 。！？； 的段落无能为力（返回 1 段），
+    一整行 100+ 字就是文字墙。逗号在中文里通常标记分句边界，按逗号切出
+    的可读行与句级条目形态一致；对齐 lst 一样可追溯到原文，逐字保留。
+    """
+    parts = re.findall(r"[^，、；]*[，、；]|[^，、；]+$", text)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if out and len(p) < 8:
+            out[-1] += p
+        else:
+            out.append(p)
+    return out if len(out) >= 2 else [text]
 
 
 def display_texts(block):
     """块 → 渲染段落文本列表。长普通段按句拆成多行，让正文页呈现条目感
     而不是大段文字墙（逐句原样保留，不改写不删字）。
     fix._body_blocks 与 verify.estimate_body_need 必须与此函数同口径，
-    否则标点修复会打错段落、容量估算会低估。"""
-    if block.block_type == "para" and len(block.text) > PARA_SPLIT_LEN:
+    否则标点修复会打错段落、容量估算会低估。
+
+    列表项（bullet）以「段落 → 每行一个句子」的形态渲染，健康条目的两行
+    不复拆，仅当 >90 字（渲染 3 行以上）才视作文字墙按句切行，防过度碎片。
+    """
+    if block.block_type in ("para", "bullet") and len(block.text) > PARA_SPLIT_LEN:
+        # 列表项允许略长（健康条目的两行形态与条目形态一致），仅防 >90 字的文字墙
+        if block.block_type == "bullet" and len(block.text) <= 90:
+            return [block.text]
+        def _short_enough(parts):
+            return all(len(p) <= PARA_SPLIT_LEN for p in parts)
         parts = _sentences(block.text)
+        # 句读切出的段可能仍超长（一个 90+ 字的大句），再对单段按逗号分句；
+        # 尾段常是「句中收尾」无逗号，clause 切不出时就保留该段（不折行丢弃）。
+        if len(parts) >= 2 and _short_enough(parts):
+            return parts
+        refined = []
+        for p in parts:
+            if len(p) > PARA_SPLIT_LEN:
+                sub = _clauses(p)
+                refined.extend(sub if len(sub) >= 2 else [p])
+            else:
+                refined.append(p)
+        if len(refined) >= 2:
+            return refined
+        parts = _clauses(block.text)  # 无句读的长单句：按逗号分句
         if len(parts) >= 2:
             return parts
     return [block.text]

@@ -65,7 +65,9 @@ def _outline_rules(blocks, page_target, doc_name, max_chars=None, body_box=None)
     if max_chars:
         # 预留块间开销（每块至少一行 + 段间距），否则块多的页在目标字号下放不下
         limit = min(limit, int(max_chars * 0.8))
-    # 超长段落按句读切分，避免单块塞不进一页（此前会一直溢出直至放弃）
+    # 渲染层会把长段拆成多行：字符预算低估真实行数（页数会被二次放大），
+    # 用「渲染段数」做打包预算，与 _fits_in（estimate_body_need）同尺。
+    limit = _page_lines(body, page_target, max_chars)
     chapters = [(t, _split_long_blocks(bs, limit)) for t, bs in chapters]
     # 字号反选：在满足目标页数的前提下取最大字号（全文档统一，避免跨页跳变）
     pages, chosen = None, 20
@@ -186,18 +188,64 @@ def _uniform_chapter_sizes(items, body_box, size=None):
             it.font_size = size
 
 
+def _block_render_lines(block):
+    """块在渲染层会拆成多少「段」（display_texts 同口径）。标题/表格计 1。"""
+    if block.block_type in ("para", "bullet"):
+        from . import render as render_mod
+
+        return max(len(render_mod.display_texts(block)), 1)
+    return 1
+
+
+def _page_lines(body, page_target, max_chars):
+    """单页渲染段数预算：兜底正值，避免页数被渲染拆行二次放大。
+
+    字符预算（limit）会被渲染层的长段拆行击穿：大纲按字符切出的块，渲染后
+    拆成 2~6 条段，每段都吃一行 + 段间距，实际行数数倍于字符预算的估算。
+    行数预算与 `_fits_in`（estimate_body_need）同一把尺，让打包与合页一致。
+    """
+    lines = sum(_block_render_lines(b) for b in body if b.block_type != "table")
+    want = lines // (page_target - 1) if (page_target and page_target > 1) else lines // 2
+    return max(6, min(want, 24))
+
+
 def _split_long_blocks(blocks, limit):
-    """把超过单页预算的段落按句读边界切成多块（保序、不丢字）。
+    """把超过单页预算的段落切成多块（保序、不丢字），按渲染段数切。
 
     单块塞不进一页时，渲染层只能一味缩字号直至溢出，故先在大纲层切开。
     """
     out = []
     for b in blocks:
-        if b.block_type in ("para", "bullet") and len(b.text) > limit:
-            out.extend(_split_text_block(b, limit))
+        if b.block_type in ("para", "bullet") and _block_render_lines(b) > limit:
+            pieces, _ = _page_lines_for_block(b, limit)
+            out.extend(pieces)
         else:
             out.append(b)
     return out
+
+
+def _page_lines_for_block(block, limit):
+    """块拆行后的实际渲染段数：单个大块超过单页预算时在句读处切断。
+
+    块拆行后的段数 = 渲染层 display_texts 的段数（与打包同口径）；当它超过
+    limit 时，把该块按句读切成若干「块内段」，每段都 ≤ limit 段渲染行，
+    保序、不丢字。标题/表格不参与拆分（表格透明计入，由 _separate_tables 独立成页）。
+    """
+    if block.block_type not in ("para", "bullet"):
+        return [block], 0.0
+    from . import render as render_mod
+
+    segs = render_mod.display_texts(block)
+    if len(segs) <= limit:
+        return [block], len(segs)
+    out, cur = [], []
+    for s in segs:
+        cur.append(s)
+        if len(cur) >= max(limit - 1, 1) or s is segs[-1]:
+            head = "".join(cur)
+            out.append(Block(block.block_type, head, level=block.level))
+            cur = []
+    return out, 0.0
 
 
 def _split_text_block(block, limit):
@@ -246,15 +294,15 @@ def _pack_sections(chapters, limit, body_box=None, size=20):
         chunks = []
         for sec_title, sec_blocks in sections:
             chunks.extend(_chunk_section(sec_title, sec_blocks, limit))
-        cur_blocks, cur_size, cur_title, pending = [], 0, None, None
+        cur_blocks, cur_lines, cur_title, pending = [], 0, None, None
         for ctitle, cblocks in chunks:
-            csize = sum(len(b.text) for b in cblocks)
-            overflow = bool(cur_blocks) and (cur_size + csize > limit
+            clines = sum(_block_render_lines(b) for b in cblocks)
+            overflow = bool(cur_blocks) and (cur_lines + clines > limit
                                              or not _fits_in(cur_blocks + cblocks, body_box, size))
             if overflow:
                 pages.append((_final_title(cur_blocks, cur_title or pending, chap_title),
                               cur_blocks, chap_title))
-                cur_blocks, cur_size, cur_title, pending = [], 0, None, None
+                cur_blocks, cur_lines, cur_title, pending = [], 0, None, None
             if not cur_blocks:
                 if ctitle.endswith("（续）"):
                     pending = ctitle
@@ -263,7 +311,7 @@ def _pack_sections(chapters, limit, body_box=None, size=20):
             elif cur_title is None and not ctitle.endswith("（续）"):
                 cur_title = ctitle  # 页首是续块：标题让位给页内首个正式分节
             cur_blocks.extend(cblocks)
-            cur_size += csize
+            cur_lines += clines
         if cur_blocks:
             pages.append((_final_title(cur_blocks, cur_title or pending, chap_title),
                           cur_blocks, chap_title))
@@ -897,7 +945,11 @@ def _assemble_llm_items(pages, blocks, doc_title, doc_name, max_chars, body_box,
             if len(tuples) <= cap:
                 break
     tuples = _dedupe_titles(tuples)
-    thesis_by_title = {p["title"]: p["thesis"] for p in pages}
+    # 论点是「页面级」属性，跟随页面首块去映射；续页/合并页共享原页论点。
+    # 不能用 {title: thesis}：文档内同名小节会让 title 撞名，后者覆盖前者，
+    # 把模型给的关键页论点冲掉（_fit_llm_pages 已把原页论点带进每个续页）。
+    thesis_by_key = {id(p["blocks"][0]): p.get("thesis", "")
+                     for p in pages if p.get("blocks")}
     # 讲稿优先用模型给的（按「页内首块」映射，标题去重/合并后仍能对上）
     notes_by_key = {id(p["blocks"][0]): p.get("notes", "")
                     for p in pages if p.get("blocks")}
@@ -911,7 +963,7 @@ def _assemble_llm_items(pages, blocks, doc_title, doc_name, max_chars, body_box,
         llm_note = llm_note.strip()  # 短也可用：混合讲稿会补支撑点与过渡
         items.append(OutlineItem(
             page_no=len(items) + 1, title=title,
-            thesis=thesis_by_title.get(title) or _first_sentence(pblocks),
+            thesis=thesis_by_key.get(id(pblocks[0])) or _first_sentence(pblocks),
             blocks=pblocks, chapter="", notes=llm_note.strip(),
         ))
     _uniform_chapter_sizes(items, body_box, _pick_uniform_size(items, body_box))
