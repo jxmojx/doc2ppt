@@ -269,18 +269,27 @@ def test_pdf_scanned_ocr(tmp_path):
     if not ocr.available():
         pytest.skip("未安装 ocr 扩展（pip install doc2ppt[ocr]）")
     src = pymupdf.open(SAMPLES / "sample_plan.pdf")
-    pix = src[0].get_pixmap(dpi=150)
     out = pymupdf.open()
-    page = out.new_page(width=src[0].rect.width, height=src[0].rect.height)
-    page.insert_image(page.rect, pixmap=pix)
+    for pno in range(src.page_count):  # 全页栅格化，逼近真实扫描件
+        sp = src[pno]
+        pix = sp.get_pixmap(dpi=200)
+        page = out.new_page(width=sp.rect.width, height=sp.rect.height)
+        page.insert_image(page.rect, pixmap=pix)
     scanned = tmp_path / "scanned.pdf"
     out.save(str(scanned))
 
     blocks = parse.parse_document(scanned)
     assert blocks, "扫描件未解析出任何内容"
-    assert any(b.block_type == "heading" for b in blocks), "OCR 后标题未被识别"
     joined = "".join(b.text or "" for b in blocks)
     assert "企业数据中台" in joined, "OCR 文本与原文不符"
+    # 版面还原：编号小节的标题都应被识别为 heading（OCR 会把「2.1 数据接入层」
+    # 读成无空格变体，故去空格比对；唯一豁免 OCR 固有错字——储≈诸）
+    truth = ["2.1数据接入层", "2.3数据服务层", "2.4数据应用层", "2.5数据安全与权限体系",
+             "三、数据治理体系", "四、实施路线图", "五、风险与保障", "六、预期收益"]
+    heads = [b.text.replace(" ", "") for b in blocks if b.block_type == "heading"]
+    miss = [t for t in truth if not any(t in h or h in t for h in heads)]
+    assert not miss, f"OCR 标题未完整还原: {miss}"
+    assert all(b.text and b.text.strip() for b in blocks), "存在空标题/空段"
 
 
 def test_pdf_borderless_table(tmp_path):

@@ -281,8 +281,7 @@ def parse_pdf(path):
         if scanned_page:
             from . import ocr
             for i, p in enumerate(ocr.page_paras(page), 1):
-                raw.append(("line", (p["text"], 11.0 * p["h_ratio"],
-                                     float(i) * 20, 0.0, False)))
+                raw.append(("line", (p["text"], _ocr_size(p), float(i) * 20, 0.0, False)))
     doc.close()
 
     body_size = _pdf_body_size(raw)
@@ -393,16 +392,32 @@ def _pdf_body_size(raw):
     return max(weight.items(), key=lambda kv: (kv[1], -kv[0]))[0]
 
 
+def _ocr_size(p):
+    """OCR 段字号代理：相对中位行高的倍率 → 字号（11pt 正文基准）。
+
+    首行高/中位行高 = 相对字号。直接透传 11*h_ratio 会放大估算误差
+    （标题 OCR 行高易偏高、正文折行并列行高噪声大），先 clamp 到
+    [1.0, 2.0]，与真实 PDF 的相对字号分布对齐。
+    """
+    ratio = p.get("h_ratio", 1.0)
+    return 11.0 * max(1.0, min(ratio, 2.0))
+
+
 def _pdf_classify(text, size, bold, y0, x0, body_size=11.0):
     """按相对字号 / 粗体 / 编号模式判定 heading 层级或正文。"""
     ratio = size / body_size if body_size else 1.0
-    is_heading = ratio >= 1.15 or (bold >= 0.6 and len(text) <= 40 and ratio >= 1.0)
+    numbered = bool(PDF_NUM_H2.match(text) or PDF_NUM_H1.match(text))
+    # 编号行是标题的强信号：即使 OCR 字号代理把它们打平成正文（行高噪声大），
+    # 短编号行（≤30 字）仍判标题。真实编号小节的标题几乎都是这个形态。
+    num_heading = numbered and len(text) <= 30
+    # 非编号标题也几乎都是短行；长正文行即使 OCR 首行行高偏大（排版噪声）
+    # 也不应判标题（否则"存储层同时提供主题域…"这种长句会被当 H2）。
+    is_heading = num_heading or (ratio >= 1.15 and len(text) <= 40) \
+        or (bold >= 0.6 and len(text) <= 40 and ratio >= 1.0)
     if not is_heading:
         return Block("para", text)
-    if PDF_NUM_H2.match(text):
-        level = 2
-    elif PDF_NUM_H1.match(text):
-        level = 1
+    if numbered:
+        level = 2 if PDF_NUM_H2.match(text) else 1
     elif ratio >= 1.5:
         level = 0 if _looks_title(text) else 1
     else:
