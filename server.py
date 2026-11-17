@@ -89,29 +89,90 @@ def _pages(raw):
     return min(max(n, 2), 30)
 
 
+# 转换期间的通知：单槽环形缓冲，按运行 id 轮询取回写给前端
+_PROGRESS = {}          # run_id -> [{"t", "phase", "msg"}]
+_PROGRESS_LOCK = threading.Lock()
+_RUN_SEQ = 0
+
+
+def _progress_id():
+    global _RUN_SEQ
+    with _PROGRESS_LOCK:
+        _RUN_SEQ += 1
+        return f"run-{time.time_ns()}-{_RUN_SEQ}"
+
+
+def _push_progress(run_id, phase, msg):
+    with _PROGRESS_LOCK:
+        buf = _PROGRESS.setdefault(run_id, [])
+        buf.append({"t": time.time(), "phase": phase, "msg": str(msg)})
+        buf[:] = buf[-200:]  # 只留最近 200 条
+
+
+def _poll_progress(run_id):
+    with _PROGRESS_LOCK:
+        return list(_PROGRESS.get(run_id) or [])
+
+
+def _clear_progress(run_id):
+    with _PROGRESS_LOCK:
+        _PROGRESS.pop(run_id, None)
+
+
 def convert_upload(doc_name, doc_bytes, tpl_name=None, tpl_bytes=None,
-                   pages=8, use_llm=False):
-    """把上传内容落到临时目录，跑完整管线，返回 (pptx 字节, 下载名, 统计)。"""
+                   pages=8, use_llm=False, progress=None):
+    """把上传内容落到临时目录，跑完整管线，返回 (pptx 字节, 下载名, 统计)。
+
+    progress: 可选回调 fn(phase, msg)，Web 端用它把阶段回显到前端。
+    """
     if len(doc_bytes) > MAX_FILE:
         raise ValueError(f"文件超过 {MAX_FILE // 1024 // 1024}MB 限制")
     src_name = safe_name(doc_name, SUPPORTED)
-    with tempfile.TemporaryDirectory(prefix="doc2ppt_") as td:
-        src = Path(td) / src_name
-        src.write_bytes(doc_bytes)
-        tpl = template_path()
-        if tpl_bytes:
-            tpl_path = Path(td) / safe_name(tpl_name or "template.pptx", {".pptx"})
-            tpl_path.write_bytes(tpl_bytes)
-            guard.guard_ooxml(tpl_path)  # 模板同样是不可信输入
-            tpl = tpl_path
-        out = Path(td) / "out.pptx"
-        stats = {}
-        _blocks, items, rounds, _log, issues = _run_once(
-            src, tpl, out, pages, preview=False, use_llm=use_llm, stats=stats)
-        blob = out.read_bytes()
-        meta = {"pages": len(items), "rounds": rounds, "issues": len(issues),
-                "degraded": bool(stats.get("degraded"))}
-        return blob, src.stem + "-输出.pptx", meta
+    import run as run_mod
+
+    _old = getattr(run_mod, "_run_progress", None)
+    old_ph = getattr(run_mod, "_run_phase", None)
+
+    def _report(phase, msg):
+        if progress is not None:
+            progress(phase, msg)
+    run_mod._run_progress = _report
+    run_mod._run_phase = _report
+    try:
+        with tempfile.TemporaryDirectory(prefix="doc2ppt_") as td:
+            src = Path(td) / src_name
+            src.write_bytes(doc_bytes)
+            tpl = template_path()
+            if tpl_bytes:
+                tpl_path = Path(td) / safe_name(tpl_name or "template.pptx", {".pptx"})
+                tpl_path.write_bytes(tpl_bytes)
+                guard.guard_ooxml(tpl_path)  # 模板同样是不可信输入
+                tpl = tpl_path
+            out = Path(td) / "out.pptx"
+            stats = {}
+            _report("开始", "解析文档…")
+            _blocks, items, rounds, _log, issues = _run_once(
+                src, tpl, out, pages, preview=False, use_llm=use_llm, stats=stats)
+            _report("完成", f"生成完成:{len(items)} 页,{len(issues)} 问题")
+            blob = out.read_bytes()
+            meta = {"pages": len(items), "rounds": rounds, "issues": len(issues),
+                    "degraded": bool(stats.get("degraded"))}
+            return blob, src.stem + "-输出.pptx", meta
+    finally:
+        if _old is not None:
+            run_mod._run_progress = _old
+        else:
+            try:
+                del run_mod._run_progress
+            except AttributeError:
+                pass
+        if old_ph is not None:
+            run_mod._run_phase = old_ph
+        else:
+            try:
+                del run_mod._run_phase
+            except AttributeError:
+                pass
 
 
 def _log_run(ok, filename, meta, secs, ip):
@@ -174,10 +235,27 @@ PAGE = """<!doctype html>
 </div>
 <script>
 const f=document.getElementById('f'),st=document.getElementById('st'),btn=document.getElementById('btn');
+let runStart=null,pool=null;
 f.addEventListener('submit',async e=>{
   e.preventDefault();btn.disabled=true;st.className='';st.textContent='正在转换，请稍候…';
   try{
-    const r=await fetch('/convert',{method:'POST',body:new FormData(f)});
+    // 先向服务端预申请 runId：转换是同步的，前端在 POST 期间无法收到进度，
+    // 因此先拿一个 id，POST /convert 时把 id 带回，转换期间轮询 /progress/<id>。
+    const rr=await fetch('/runid',{method:'POST'});
+    const id=(await rr.json()).id;
+    runStart=Date.now();
+    pool=setInterval(async()=>{
+      try{
+        const p=await fetch('/progress/'+id);
+        if(p.status===404){clearInterval(pool);return;}
+        const j=await p.json();
+        const last=j.steps&&j.steps[j.steps.length-1];
+        if(last){const secs=Math.round((Date.now()-runStart)/1000);
+          st.textContent='['+secs+'s] '+last.phase+'：'+last.msg;}
+      }catch(_){}
+    },700);
+    const fd=new FormData(f);fd.append('runid',id);
+    const r=await fetch('/convert',{method:'POST',body:fd});
     const ct=r.headers.get('content-type')||'';
     if(!r.ok||ct.includes('json')){
       let msg='转换失败';try{msg=(await r.json()).error||msg}catch(_){}
@@ -190,7 +268,8 @@ f.addEventListener('submit',async e=>{
     setTimeout(()=>URL.revokeObjectURL(a.href),4000);
     st.textContent='完成：'+name+'（已开始下载）'+(degraded?'　⚠ 本机校验降级：仅估算，未检查标点，建议复验':'');
     if(degraded) st.className='err';
-  }catch(err){st.className='err';st.textContent='错误：'+err.message;}
+    if(pool)clearInterval(pool);
+  }catch(err){st.className='err';st.textContent='错误：'+err.message;if(pool)clearInterval(pool);}
   finally{btn.disabled=false;}
 });
 </script></body></html>""".encode()
@@ -205,13 +284,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", PAGE)
         elif path == "/health":
             self._json(200, {"ok": True, "llm": bool(os.environ.get("DOC2PPT_API_KEY"))})
+        elif path.startswith("/progress/"):
+            run_id = path.split("/", 2)[2]
+            # Web 端轮询转换阶段：完成后该 id 会立即被清理，返回 404 表示已结束
+            buf = _poll_progress(run_id)
+            if not buf:
+                self._json(404, {"error": "done"})
+            else:
+                self._json(200, {"steps": buf})
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/convert":
+        path = self.path.split("?", 1)[0]
+        if path == "/runid":
+            # 预申请一个运行 id，前端先拿 id 再轮询进度、后发转换
+            self._json(200, {"id": _progress_id()})
+            return
+        if path != "/convert":
             self._json(404, {"error": "not found"})
             return
         name, t0 = "?", time.time()
@@ -229,11 +321,18 @@ class Handler(BaseHTTPRequestHandler):
             if not data:
                 raise ValueError("上传文件为空")
             tpl_name, tpl_data = files.get("template", (None, None))
+            # 前端上传前先 GET /runid 拿 id 轮询进度；没拿到时自己生成
+            raw_id = (fields.get("runid") or [None])[0] if isinstance(fields.get("runid"), list) else fields.get("runid")
+            run_id = str(raw_id) if raw_id else _progress_id()
+
+            def _web_progress(phase, msg):
+                _push_progress(run_id, phase, msg)
             with _CONVERT_LOCK:  # COM 渲染不支持并发，串行执行
                 blob, out_name, meta = convert_upload(
                     name, data, tpl_name, tpl_data,
                     _pages(fields.get("pages")),
-                    fields.get("llm") in ("1", "on", "true"))
+                    fields.get("llm") in ("1", "on", "true"),
+                    progress=_web_progress)
             extra = {
                 "Content-Disposition":
                     f"attachment; filename=\"output.pptx\"; "
@@ -244,11 +343,14 @@ class Handler(BaseHTTPRequestHandler):
                 extra["X-Verify-Degraded"] = "1"
             self._send(200, PPTX_MIME, blob, extra)
             _log_run(True, name, meta, time.time() - t0, self.client_address[0])
+            _clear_progress(run_id)  # 转换完成，前端轮询该 id 返回 404=结束
         except (ValueError, SystemExit) as e:
             msg = (e.code if isinstance(e.code, str) else "转换失败") \
                 if isinstance(e, SystemExit) else str(e)
             _log_run(False, name, {"error": msg}, time.time() - t0,
                      self.client_address[0])
+            _push_progress(run_id, "失败", str(msg))
+            _clear_progress(run_id)
             self._json(400, {"error": msg})
         except Exception as e:  # noqa: BLE001 - 服务端兜底：记日志，不向客户端泄漏堆栈
             traceback.print_exc()

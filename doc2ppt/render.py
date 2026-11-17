@@ -600,10 +600,10 @@ def _unit(cell):
 def _chart_spec(headers, rows):
     """判断表格能否转成原生图表，返回 spec 或 None。
 
-    条件：≥2 行、1 个分类列 + 至少 1 个全数值的数据列；最多取 2 个数据列；
+    条件：≥2 行、1 个分类列 + 至少 1 个全数值的数据列；最多取 4 个数据列；
     **所有数值单位必须一致**（% 与 秒 混在同一坐标轴会误导，宁可不画）。
     类型：分类值像时间（年/月/季/第N期）→ 折线；单列且都在 0-100 且合计≈100 → 饼图；
-    其余 → 柱状图（对比）。
+    其余 → 柱状图（对比）。多系列同单位 → 分组柱/折线多线。
     """
     if len(headers) < 2 or len(rows) < 2 or len(rows) > 8:
         return None
@@ -621,7 +621,7 @@ def _chart_spec(headers, rows):
         units |= col_units
     if not series or len(units) > 1:
         return None  # 无可用数值列，或单位不一致
-    series = series[:2]
+    series = series[:4]  # 至多 4 个同单位系列（分组柱/多线）
     if _looks_temporal(cats):
         kind = "line"
     elif len(series) == 1 and all(0 <= v <= 100 for v in series[0][1]) \

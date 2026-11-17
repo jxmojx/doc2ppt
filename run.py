@@ -80,7 +80,23 @@ def main(argv=None):
 
 
 def _run_once(doc, tpl, out, pages, preview=False, stats=None, use_llm=False):
-    """跑完整管线，返回 (blocks, items, rounds, log, issues)。"""
+    """跑完整管线，返回 (blocks, items, rounds, log, issues)。
+
+    server.py 会注入 `_run_phase(phase, msg)` 钩子把阶段回显给前端；
+    没有注入时这里不发通知（CLI 保持原样）。
+    """
+    def _emit(phase, msg):
+        # 通知失败不影响转换：钩子是 Web 前端回显，断连/异常静默跳过
+        for fn in (sys.modules[__name__].__dict__.get("_run_phase"),
+                   sys.modules[__name__].__dict__.get("_run_progress")):
+            if fn is None:
+                continue
+            try:
+                fn(phase, msg)
+            except Exception:  # noqa: BLE001, S110 见上注释
+                pass
+
+    _emit("解析", "读取文档并结构化…")
     try:
         blocks = parse.parse_document(doc)
     except ValueError as e:
@@ -89,14 +105,17 @@ def _run_once(doc, tpl, out, pages, preview=False, stats=None, use_llm=False):
         hint = "（该 PDF 可能没有文本层，属扫描件；请先 OCR 再转换）" \
             if doc.suffix.lower() == ".pdf" else ""
         print(f"警告: 未提取到任何内容{hint}", file=sys.stderr)
+    _emit("大纲", "生成页面大纲（分页/标题/论点）…")
     _prs, infos = template.load_template(tpl)
     capacity = template.body_capacity(infos)
     body_spec = infos["content"].slots.get("body")
     body_box = (body_spec.w, body_spec.h) if body_spec else None
     items = outline.build_outline(blocks, page_target=pages, doc_name=doc.name,
                                   max_chars=capacity, body_box=body_box, use_llm=use_llm)
+    _emit("渲染", "套用版式渲染幻灯片…")
     png_dir = (ROOT.parent / "preview" / doc.stem) if preview else None
     rounds, log, issues = fix.run(items, tpl, out, png_dir=png_dir, stats=stats)
+    _emit("校验", f"渲染真值校验（{rounds} 轮修复完成）…")
     return blocks, items, rounds, log, issues
 
 
