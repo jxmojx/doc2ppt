@@ -159,6 +159,11 @@ def _check_static(path):
                 continue
             if not sh.text_frame.text.strip():
                 if _is_content_ph(layout_name, sh):
+                    # 空槽判定：指标/流程/目录页的视觉内容由 doc2ppt_dec 装饰形状承载，
+                    # 预留的真实正文槽不在场（装饰形状非占位符），不再误报 empty。
+                    if layout_name in ("指标页", "流程页", "目录页") \
+                            and any(o.name.startswith("doc2ppt_dec") for o in slide.shapes):
+                        continue
                     issues.append(Issue(i, sh.name, "empty", "mid",
                                         "内容槽位为空", "补充内容或转人工"))
                 continue
@@ -385,6 +390,11 @@ def _pixel_overflow(path, pngs):
                 stamp_lefts.append(sh.left / 914400 * 72)
                 continue  # 页脚戳不参与扫描、不作天花板（其墨迹在框底+24pt 窗内）
             # doc2ppt_intro（表格页导语）保持普通形状：参与扫描并充当上方标题的天花板
+            # doc2ppt_dec（指标卡/时间线/目录块等装饰形状）：墨迹是卡片自身的视觉
+            #（色块/圆点/编号），像素扫描既会误当文本溢出，又会当天花板顶住上面的
+            # 正文——统一跳过，不作扫描矩形也不作 ceiling（与空槽判定同一条豁免线）。
+            if sh.name.startswith("doc2ppt_dec"):
+                continue
             # 表格/图片/图表计入 ceiling（其墨迹会干扰上方文字扫描），但自身不参与扫描
             is_pic = getattr(sh, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE
             is_graphic = sh.has_table or is_pic or getattr(sh, "has_chart", False)
@@ -469,7 +479,13 @@ def _ph_idx(sh):
 
 
 def _is_content_ph(layout_name, sh):
-    """正文槽判定：占位符 idx 1（跨模板通用）。表格页会移除该槽，故不在此列为空。"""
+    """正文槽判定：占位符 idx 1（跨模板通用）。表格页会移除该槽，故不在此列为空。
+
+    指标卡/流程页的装饰形状（doc2ppt_dec 前缀）随自绘卡片加入，不参与空槽
+    判定与溢出扫描——它们只是视觉元素，不是版式内容槽。
+    """
+    if sh.name.startswith("doc2ppt_"):  # 页脚戳/导语/装饰形状，不属于版式内容
+        return False
     return _ph_idx(sh) == 1
 
 

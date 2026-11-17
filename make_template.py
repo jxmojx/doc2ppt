@@ -39,6 +39,9 @@ SPECS = [
     ("content", 1, "内容页"),
     ("two_col", 3, "两栏页"),
     ("chart", 7, "图表页"),
+    ("agenda", 2, "目录页"),      # 借 Section Header（标题+body），重命名为目录页
+    ("stats", 4, "指标页"),       # 借 Comparison（标题+body），重命名为指标页
+    ("steps", 9, "流程页"),       # 借 Vertical Text（标题+body），重命名为流程页
 ]
 
 PP_DATE, PP_FOOTER = 16, 15  # 需移除的占位符类型
@@ -145,6 +148,30 @@ def build():
             cap = ph_by_idx(layout, 2)
             set_geom(cap, 0.8, 6.15, 12.0, 0.9)  # 脚注槽：引导语 2-3 行 + 数据来源
             style_para(cap.text_frame.paragraphs[0], 12, C_CAPT)
+        elif sem in ("agenda", "stats", "steps"):
+            # 新语义版式：清晰化为「标题 + 正文槽」独立版式，视觉元素由渲染层自绘。
+            # 借用的默认布局槽位几何各不相同，逐语义重排统一为内容页布局。
+            t = ph_by_idx(layout, 0)
+            set_geom(t, 0.8, 0.35, 12.0, 0.9)
+            style_para(t.text_frame.paragraphs[0], 32, C_DARK, bold=True)
+            b = ph_by_idx(layout, 1)
+            set_geom(b, 0.8, 1.5, 12.0, 5.6)
+            style_para(b.text_frame.paragraphs[0], 20, C_BODY)
+            # 归一化正文槽：去竖排（垂直文本布局残留 ebVert 会横向挤爆）与旧锚点
+            bodypr = b._element.find(
+                ".//{http://schemas.openxmlformats.org/drawingml/2006/main}bodyPr")
+            if bodypr is not None:
+                bodypr.attrib.pop("vert", None)
+                bodypr.attrib.pop("anchor", None)
+            # 移除多余槽：Comparison 有 body2/body3 等，指标页只保留标题与正文
+            for ph in list(layout.placeholders):
+                if ph.placeholder_format.type in (PP_DATE, PP_FOOTER, 13):
+                    ph._element.getparent().remove(ph._element)
+                elif ph.placeholder_format.type in (1, 3) or ph.placeholder_format.idx == 1:
+                    continue
+                else:
+                    ph._element.getparent().remove(ph._element)
+            layout._element.set("showMasterSp", "0")  # 独立版式不继承演示文稿母版修饰
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     prs.save(OUT)
@@ -169,6 +196,7 @@ def report():
                   f"{ph.name:<30} x={ph.left / EMU:5.2f} y={ph.top / EMU:5.2f} "
                   f"w={ph.width / EMU:5.2f} h={ph.height / EMU:5.2f} "
                   f"font={p.font.name} {size} #{color}")
+    print(f"\n共 {len(SPECS)} 个语义版式（{len(list(prs.slide_layouts))} 个布局槽）")
 
 
 if __name__ == "__main__":

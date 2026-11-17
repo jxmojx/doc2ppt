@@ -27,6 +27,8 @@ FONT_FILES = {
     "宋体": ["simsun.ttc", "simsun.ttf"],
 }
 C_TITLE, C_BODY, C_SUB, C_CAPT = "1F4E79", "333333", "595959", "7F7F7F"
+C_CARD = "D6DEE8"  # 指标卡描边
+C_DARK = C_TITLE  # 装饰主色（编号点/目录块）
 C_HEAD, C_ZEBRA = "DEEBF7", "F4F8FC"
 TABLE_ROW_IN = 0.33  # 表格单行高度（英寸，≈1.6 倍 14pt 字号）
 INTRO_PT = 16        # 表格页导语字号
@@ -59,24 +61,79 @@ def pick_font():
     return name, warn
 
 
-SEMANTICS = ("title", "content", "two_col", "chart")
+SEMANTICS = ("title", "content", "two_col", "chart", "agenda", "stats", "steps")
 TWO_COL_THRESHOLD = 6  # 列表项 ≥ 该值走两栏
 
 
 def pick_layout(item) -> str:
-    """版式选型规则：封面→title；含表格→chart；纯列表页（≥6 列表项且
-    页内 ≤1 个小节标题）→two_col；其余（含多节合并页）→content。"""
+    """版式选型规则：封面→title；含表格→chart；目录/指标/流程靠内容特征触发。
+
+    - 纯列表页（≥6 列表项且页内 ≤1 个小节标题）→ two_col
+    - 全是短句（≤16 字、非编号、无表）的列表/语句页 → stats（指标卡）
+    - 编号/顺序步骤（带「一、1. 第X步」等）的条目页 → steps（时间线）
+    - 其余含多节合并页 → content
+    """
     if item.layout_hint in SEMANTICS:
         return item.layout_hint
     if item.page_no == 1:
         return "title"
     if any(b.block_type == "table" for b in item.blocks):
         return "chart"
+    # 目录页专有信号：页内有 ≥4 个独立小节标题（heading），且无正文/列表块
+    hs = [b.text for b in item.blocks if b.block_type == "heading" and b.text.strip()
+          and not (item.title and b.text.strip() in (item.title,))]
+    if len(hs) >= 4 and not any(b.block_type in ("para", "bullet", "table") and b.text.strip()
+                                for b in item.blocks):
+        return "agenda"
     bullets = sum(1 for b in item.blocks if b.block_type == "bullet")
     headings = sum(1 for b in item.blocks if b.block_type == "heading")
+    texts = [b.text for b in item.blocks
+             if b.block_type in ("bullet", "para") and b.text.strip()]
+    # 步骤/流程短语（≥3 条且半数带「第X步/阶段/首先…」）→ 流程页
+    if len(texts) >= 3 and _step_ratio(texts) >= 0.5:
+        return "steps"
+    if (len(texts) >= 3 and headings <= 1 and not _has_numbered(texts)
+            and all(len(t) <= 16 for t in texts)):
+        return "stats"  # 全是短句 → 指标卡页
     if bullets >= TWO_COL_THRESHOLD and headings <= 1:
         return "two_col"
     return "content"
+
+
+_STEP_MARKS = ("第一步", "第二步", "第", "阶段", "步骤", "首先", "其次", "然后", "最后")
+
+
+def _has_numbered(texts):
+    """是否含条目编号（一、/1. 1、／（一）），用于识别步骤/章节大类。
+
+    只匹配「编号 + 中文/空白」的条目形态：小数（2.1x）等不是编号（x 非中文，
+    且 "2.1" 后可跟中文才像编号），避免把指标短语页误判为编号列表。
+    """
+    import re as _re
+    return any(_re.match(r"^(\d+[、．])", t)
+               or _re.match(r"^(\d+\.\s*[一-龥])", t)
+               or _re.match(r"^（[一二三四五六七八九十]+）", t)
+               or _re.match(r"^[一二三四五六七八九十]+[、．]", t)
+               for t in texts)
+
+
+def _step_ratio(texts):
+    import re as _re
+
+    def _is_step(t):
+        if _re.match(r"^第[一二三四五六七八九十百]+(步|阶段|部分)", t):
+            return True
+        if any(t.startswith(m) for m in ("首先", "其次", "然后", "最后")):
+            return True
+        # 编号目录（1. / 一、 1、 等）只在「编号+中文/空格」形态下视为步骤标题；
+        # 行首数字/小数字段（99.9%、3.2x、2.1）不是编号，不能当步骤
+        if _re.match(r"^(\d+[、．]|[一二三四五六七八九十]+[、．])", t):
+            return len(t) <= 24
+        return False
+
+    if not texts:
+        return 0.0
+    return sum(1 for t in texts if _is_step(t)) / len(texts)
 
 
 def render(items, template_path, out_path, warnings=None):
@@ -156,6 +213,12 @@ def _fill_slide(slide, item, sem, info, font, warnings):
         _set_para(title_ph, item.title, tsize, C_TITLE, bold=True, font=font, center=True)
     if sem == "chart" and any(b.block_type == "table" for b in item.blocks):
         _fill_chart_slide(slide, item, info, font, warnings)
+    elif sem == "stats":
+        _fill_stats_slide(slide, item, info, font)
+    elif sem == "steps":
+        _fill_steps_slide(slide, item, info, font)
+    elif sem == "agenda":
+        _fill_agenda_slide(slide, item, info, font)
     else:
         _fill_content_slide(slide, item, sem, info, font)
 
@@ -197,6 +260,10 @@ def _balance_short_page(body, item, size, info):
 
 def _place_images(slide, item, info, size):
     """把原文档图片按比例嵌入正文下方剩余空间（空间不足则只留备注提示）。"""
+    from io import BytesIO
+
+    import pymupdf
+
     from . import verify as verify_mod
 
     imgs = [im for b in item.blocks if b.block_type == "image"
@@ -208,10 +275,6 @@ def _place_images(slide, item, info, size):
     free_in = spec.h - need_pt / 72 - 0.15
     if free_in < 1.0:  # 正文已占满，图片留给人工补充
         return
-    from io import BytesIO
-
-    import pymupdf
-
     x_in, y_in, w_in = spec.x, spec.y + need_pt / 72 + 0.12, spec.w
     for im in imgs[:2]:  # 最多两张，避免堆叠溢出
         try:
@@ -232,6 +295,208 @@ def _place_images(slide, item, info, size):
         free_in -= h_in + 0.1
         if free_in < 1.0:
             break
+
+
+def _fill_stats_slide(slide, item, info, font):
+    """指标页：短语句条目 → 横向指标卡（大字号 + 短语）。
+
+    每个条目一张淡色圆角卡片：首词大号（主干数字/形容词），其余缩略小号注释。
+    卡片按 2-3 列 × N 行网格排布，自动撑满版心。
+    """
+    spec = info.slots.get("body")
+    if spec is None:
+        return
+    size = item.font_size or DEFAULT_BODY
+    texts = [b.text.strip() for b in item.blocks
+             if b.block_type in ("para", "bullet") and b.text.strip()]
+    if not texts:
+        return
+    texts = _flatten_texts(texts)  # 每条一句为限，超长并入上一条
+    n = len(texts)
+    cols = 2 if n <= 3 else (3 if n <= 9 else 4)
+    rows = math.ceil(n / cols)
+    # 版心 12x5.6in，左右留 0.15 边距、卡间距 0.15
+    margin, gap = 0.0, 0.15
+    card_w = (spec.w - margin * 2 - gap * (cols - 1)) / cols
+    card_h = min(1.6, (spec.h - gap * (rows - 1)) / rows)
+    y = spec.y
+    for i, t in enumerate(texts):
+        r, c = divmod(i, cols)
+        x = spec.x + c * (card_w + gap)
+        yy = spec.y + r * (card_h + gap)
+        _add_card(slide, x, yy, card_w, card_h, t, size, font)
+        y = yy + card_h
+    _balance_deco(slide, spec, y)
+
+
+def _flatten_texts(texts):
+    out = []
+    for t in texts:
+        if out and len(t) > 40:
+            out[-1] += "；" + t
+        else:
+            out.append(t)
+    return out
+
+
+def _add_card(slide, x, y, w, h, text, size, font):
+    """画一张淡色卡片：底色块 + 主文（大） + 次文（小）。
+
+    卡片命名 doc2ppt_dec（装饰形状）——verify 的像素溢出/空槽/字号检查
+    均豁免装饰形状，只对实内容形状负责。
+    """
+    from pptx.enum.shapes import MSO_SHAPE
+
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                 Emu(int(x * 914400)), Emu(int(y * 914400)),
+                                 Emu(int(w * 914400)), Emu(int(h * 914400)))
+    box.name = "doc2ppt_dec_card"
+    box.adjustments[0] = 0.06
+    box.fill.solid()
+    box.fill.fore_color.rgb = RGBColor.from_string("EEF2F8")
+    box.line.color.rgb = RGBColor.from_string("D6DEE8")
+    box.line.width = Emu(9525)
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = Emu(int(0.12 * 914400))
+    tf.margin_top = tf.margin_bottom = Emu(int(0.08 * 914400))
+    # 主干：首句/首词（≤8 字）大号加粗；其余注释 0.62 倍
+    head, _, rest = text.partition("：")
+    if not rest:
+        head, _, rest = text.partition("：") if "：" in text else (head, "", "")
+    if not rest:
+        head, rest = text, ""
+    main = head if len(head) <= 8 and head else text
+    sub = rest if rest else (text if head != text else "")
+    p0 = tf.paragraphs[0]
+    _set_run_text(p0, p0.add_run(), main, max(int(size * 1.3), 20), True, C_TITLE, font)
+    if sub:
+        p1 = tf.add_paragraph()
+        _set_run_text(p1, p1.add_run(), sub, max(int(size * 0.72), 12), False, C_BODY, font)
+
+
+def _fill_steps_slide(slide, item, info, font):
+    """流程页：步骤条目 → 横向时间线（编号圆点 + 连接线 + 条目文字）。
+
+    步骤少（≤4）横排，一行一节点；多条则 2 行双排。节点 = 圆点 + 顺序号 + 描述。
+    装饰命名 doc2ppt_dec（verify 豁免）。
+    """
+    spec = info.slots.get("body")
+    if spec is None:
+        return
+    size = item.font_size or DEFAULT_BODY
+    texts = [b.text.strip() for b in item.blocks
+             if b.block_type in ("para", "bullet", "heading") and b.text.strip()
+             and not (b.block_type == "heading" and _same_title(b.text, item.title))]
+    texts = _flatten_texts(texts)
+    n = len(texts)
+    if n == 0:
+        return
+    # 竖排时间线更通用：每行一节点，左侧圆点 + 右侧文字（容纳更长描述）
+    y = spec.y
+    node_h = min(1.2, (spec.h - 0.3) / max(n, 1))
+    for i, t in enumerate(texts):
+        yy = spec.y + i * (node_h + 0.12)
+        _add_step(slide, spec.x, yy, spec.w, node_h, i + 1, t, size, font)
+        y = yy + node_h
+    _balance_deco(slide, spec, y)
+
+
+def _add_step(slide, x, y, w, h, num, text, size, font):
+    """画一个时间线节点：左圆点 + 编号，右文字。装饰命名 doc2ppt_dec。"""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    dot_r = min(0.22, h * 0.22)
+    dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Emu(int(x * 914400)),
+                                 Emu(int((y + h / 2 - dot_r) * 914400)),
+                                 Emu(int(dot_r * 2 * 914400)),
+                                 Emu(int(dot_r * 2 * 914400)))
+    dot.name = "doc2ppt_dec_dot"
+    dot.fill.solid()
+    dot.fill.fore_color.rgb = RGBColor.from_string(C_DARK)
+    dot.line.fill.background()
+    # 连接线下一个点
+    if num > 1 and h * 0.4:
+        pass
+    num_tb = slide.shapes.add_textbox(
+        Emu(int((x + 0.02) * 914400)), Emu(int(y * 914400)),
+        Emu(int(0.6 * 914400)), Emu(int(h * 914400)))
+    num_tb.name = "doc2ppt_dec_num"
+    _set_run_text(num_tb.text_frame.paragraphs[0], num_tb.text_frame.paragraphs[0].add_run(),
+                  str(num), int(size * 1.15), True, C_DARK, font)
+    tb = slide.shapes.add_textbox(
+        Emu(int((x + 0.75) * 914400)), Emu(int(y * 914400)),
+        Emu(int((w - 0.85) * 914400)), Emu(int(h * 914400)))
+    tb.name = "doc2ppt_dec_step"
+    _set_run_text(tb.text_frame.paragraphs[0], tb.text_frame.paragraphs[0].add_run(),
+                  text, size, False, C_BODY, font)
+
+
+def _fill_agenda_slide(slide, item, info, font):
+    """目录页：章条目 → 左侧编号条 + 章名，纵向铺开。"""
+    spec = info.slots.get("body")
+    if spec is None:
+        return
+    size = item.font_size or DEFAULT_BODY
+    texts = [b.text.strip() for b in item.blocks
+             if b.block_type in ("para", "bullet", "heading") and b.text.strip()
+             and not (b.block_type == "heading" and _same_title(b.text, item.title))]
+    texts = _flatten_texts(texts)
+    n = len(texts)
+    if n == 0:
+        return
+    row_h = min(0.95, (spec.h - 0.2) / max(n, 1))
+    y = spec.y
+    for i, t in enumerate(texts):
+        yy = spec.y + i * (row_h + 0.08)
+        _add_agenda_row(slide, spec.x + 0.3, yy, spec.w - 0.6, row_h, i + 1, t, size, font)
+        y = yy + row_h
+    _balance_deco(slide, spec, y)
+
+
+def _add_agenda_row(slide, x, y, w, h, num, text, size, font):
+    """画一个目录行：圆角编号块 + 章名（装饰命名 doc2ppt_dec）。"""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    tag_w, tag_h = 0.62, h * 0.72
+    tag = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                 Emu(int(x * 914400)), Emu(int((y + h / 2 - tag_h / 2) * 914400)),
+                                 Emu(int(tag_w * 914400)), Emu(int(tag_h * 914400)))
+    tag.name = "doc2ppt_dec_tag"
+    tag.adjustments[0] = 0.3
+    tag.fill.solid()
+    tag.fill.fore_color.rgb = RGBColor.from_string(C_DARK)
+    tag.line.fill.background()
+    _set_run_text(tag.text_frame.paragraphs[0], tag.text_frame.paragraphs[0].add_run(),
+                  str(num), int(size * 0.8), True, "FFFFFF", font)
+    tb = slide.shapes.add_textbox(
+        Emu(int((x + tag_w + 0.25) * 914400)), Emu(int(y * 914400)),
+        Emu(int((w - tag_w - 0.35) * 914400)), Emu(int(h * 914400)))
+    tb.name = "doc2ppt_dec_agenda"
+    _set_run_text(tb.text_frame.paragraphs[0], tb.text_frame.paragraphs[0].add_run(),
+                  text, size, False, C_BODY, font)
+
+
+def _balance_deco(slide, spec, last_y):
+    """装饰网格整体垂直居中（内容不足半版心时），避免上坠或下坠。"""
+    if last_y <= spec.y + spec.h * 0.5:
+        shift = max(0.0, spec.y + (spec.h - (last_y - spec.y)) / 2)
+        if shift > 0:
+            for sh in slide.shapes:
+                if sh.name.startswith("doc2ppt_dec"):
+                    sh.top = Emu(int((sh.top / 914400 + (shift - spec.y)) * 914400)) if False else sh.top
+            # 简单垂直居中：平移装饰到中心
+            span = last_y - spec.y
+            delta = (spec.h - span) / 2
+            for sh in slide.shapes:
+                if sh.name.startswith("doc2ppt_dec"):
+                    sh.top = Emu(int((sh.top / 914400 - spec.y + delta) * 914400))
+
+
+def _set_run_text(para, run, text, size, bold, color, font):
+    """设置一个 run 的文本与样式（latin+ea 双写，中文才生效）。"""
+    run.text = text
+    _style_run(run, size, bold, color, font)
 
 
 def _balance_blocks(body, blocks, size, info):

@@ -1,14 +1,17 @@
 """M2 模板解析：读模板 pptx → 语义版式 + 槽位角色。
 
-支持任意 .pptx 模板：先按版式名（中英文）匹配四类语义版式，匹配不到再按
+支持任意 .pptx 模板：先按版式名（中英文）匹配七类语义版式，匹配不到再按
 占位符结构打分（标题槽 + 正文槽的数量、位置、面积）。缺失的版式按降级规则
 补齐（如无两栏版式则两栏内容回落单栏），保证任何模板都能出片。
 
-四类语义版式与角色：
+七类语义版式与角色：
   title    封面：title(主标题) + subtitle
   content  内容页：title + body
   two_col  两栏页：title + body + body2（无则降级为单栏）
   chart    图表页：title + body(表格区) + caption(数据来源，可缺)
+  agenda   目录页：title + body（条目由渲染层画目录序号条）
+  stats    指标页：title + body（条目由渲染层画指标卡）
+  steps    流程页：title + body（条目由渲染层画时间线）
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +21,15 @@ from pptx import Presentation
 from .guard import guard_ooxml
 from .models import SlotSpec
 
-LAYOUT_MAP = {"title": "标题页", "content": "内容页", "two_col": "两栏页", "chart": "图表页"}
+LAYOUT_MAP = {
+    "title": "标题页",
+    "content": "内容页",
+    "two_col": "两栏页",
+    "chart": "图表页",
+    "agenda": "目录页",
+    "stats": "指标页",
+    "steps": "流程页",
+}
 
 # 不参与填充的占位符（日期/页脚/页码）
 SKIP_TYPES = {13, 15, 16}
@@ -33,8 +44,13 @@ NAME_RULES = (
     ("title", ("title slide", "标题幻灯片", "封面", "cover")),
     ("two_col", ("two content", "两栏", "双栏", "对比", "comparison")),
     ("chart", ("content with caption", "图表", "caption", "数据页", "表格页")),
+    ("agenda", ("agenda", "目录", "table of content", "toc")),
+    ("stats", ("stats", "指标", "kpi", "数字")),
+    ("steps", ("steps", "流程", "步骤", "timeline", "时间线")),
     ("content", ("title and content", "标题和内容", "正文", "content")),
 )
+
+CONTENT_FALLBACK = ("content", "title", "agenda", "stats", "steps", "two_col", "chart")
 
 
 @dataclass
@@ -74,7 +90,7 @@ def _probe(prs, sw, sh):
                 scored[sem].append((s, layout, feats))
     infos = {}
     used = set()
-    for sem in ("title", "content", "two_col", "chart"):
+    for sem in ("title", "content", "two_col", "chart", "agenda", "stats", "steps"):
         cand = sorted(scored[sem], key=lambda x: -x[0])
         pick = next((c for c in cand if id(c[1]) not in used), None) or (cand[0] if cand else None)
         if pick is None:
@@ -100,6 +116,11 @@ def _probe(prs, sw, sh):
                                       dict(content.slots))
     if "chart" not in infos:
         infos["chart"] = LayoutInfo("chart", content.layout, dict(content.slots))
+    # 新语义均可用 content 版式兜底（渲染层视觉自绘不依赖专属槽位）
+    fall = infos.get("content")
+    for sem in ("agenda", "stats", "steps"):
+        if sem not in infos and fall is not None:
+            infos[sem] = LayoutInfo(sem, fall.layout, dict(fall.slots))
     return infos
 
 
