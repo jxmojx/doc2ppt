@@ -622,15 +622,31 @@ def _chart_spec(headers, rows):
     if not series or len(units) > 1:
         return None  # 无可用数值列，或单位不一致
     series = series[:4]  # 至多 4 个同单位系列（分组柱/多线）
-    if _looks_temporal(cats):
-        kind = "line"
-    elif len(series) == 1 and all(0 <= v <= 100 for v in series[0][1]) \
-            and 95 <= sum(series[0][1]) <= 105:
-        kind = "pie"
-    else:
-        kind = "column"
+    kind = _pick_chart_kind(cats, series)
     return {"kind": kind, "categories": cats, "series": series,
             "unit": next(iter(units)) if units else ""}
+
+
+def _pick_chart_kind(cats, series):
+    """按数据形态选图表类型（可读性优先）。
+
+    - 时间分类（年/月/季）→ 折线（趋势）
+    - 单系列且都在 0-100 且合计≈100 → 饼图（占比/构成）
+    - 多系列同单位 → 堆积柱（系列名含「占比/构成/份额」时）否则分组柱
+    - 分类名很长（>12 字，横向摆放阅读）→ 横向柱状图
+    其余 → 纵向柱状图。
+    """
+    if _looks_temporal(cats):
+        return "line"
+    if len(series) == 1 and all(0 <= v <= 100 for v in series[0][1]) \
+            and 95 <= sum(series[0][1]) <= 105:
+        return "pie"
+    names = [n for n, _ in series]
+    if len(series) > 1 and any(any(k in n for k in ("占比", "构成", "份额", "比例")) for n in names):
+        return "stacked"
+    if max(len(c) for c in cats) > 12:
+        return "hbar"
+    return "column"
 
 
 _TEMPORAL_RE = re.compile(r"(\d{4}\s*年|^\d{1,2}\s*月|^[Qq][1-4]|第[一二三四1-4]季度|"
@@ -649,7 +665,9 @@ def _draw_chart(slide, spec, box, font_size=14):
         data.add_series(name, vals)
     kinds = {"column": XL_CHART_TYPE.COLUMN_CLUSTERED,
              "pie": XL_CHART_TYPE.PIE,
-             "line": XL_CHART_TYPE.LINE_MARKERS}
+             "line": XL_CHART_TYPE.LINE_MARKERS,
+             "stacked": XL_CHART_TYPE.COLUMN_STACKED,
+             "hbar": XL_CHART_TYPE.BAR_CLUSTERED}
     gf = slide.shapes.add_chart(kinds[spec["kind"]], Emu(int(box["left"])),
                                 Emu(int(box["top"])), Emu(int(box["width"])),
                                 Emu(int(box["height"])), data)
@@ -670,7 +688,7 @@ def _draw_chart(slide, spec, box, font_size=14):
         plot.data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
     else:
         plot.data_labels.font.size = Pt(10)
-        if spec["kind"] == "column":
+        if spec["kind"] in ("column", "hbar", "stacked"):
             plot.gap_width = 60
     return chart
 

@@ -187,6 +187,32 @@ def _log_run(ok, filename, meta, secs, ip):
         pass
 
 
+def preview_template(tpl_name, tpl_bytes):
+    """模板向导：把上传的 .pptx 落到临时文件，探测语义版式，返回可回显的结构。
+
+    只读不动：不转换、不出片，供前端展示『模板能命中哪些语义版式 + 槽位』。
+    """
+    from doc2ppt import template as T
+    with tempfile.TemporaryDirectory(prefix="doc2ppt_tpl_") as td:
+        tpl_path = Path(td) / safe_name(tpl_name or "template.pptx", {".pptx"})
+        tpl_path.write_bytes(tpl_bytes)
+        guard.guard_ooxml(tpl_path)  # 模板同样是不可信输入
+        _prs, infos = T.load_template(tpl_path)
+        layouts = []
+        for sem in T.LAYOUT_MAP:
+            info = infos.get(sem)
+            if info is None:
+                layouts.append({"sem": sem, "name": None, "desc": "未识别（将回落默认版式）"})
+                continue
+            slots = "、".join(role for role in ("title", "subtitle", "body", "body2", "caption")
+                              if role in info.slots)
+            layouts.append({"sem": sem, "name": info.layout.name,
+                            "desc": f"槽位：{slots}"})
+        return {"layouts": layouts,
+                "note": "缺失的语义会按「content 版式」兜底；版式名含 标题/两栏/图表/目录/指标/流程 等关键词优先命中"}
+
+
+
 PAGE = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -230,17 +256,40 @@ PAGE = """<!doctype html>
     <label class="check"><input type="checkbox" name="llm" value="1"> 使用大模型大纲（需服务端已配置 API Key）</label>
     <button id="btn" type="submit">转换并下载</button>
     <div id="st"></div>
-    <div class="hint">转换通常 5–20 秒；单文件上限 30MB。生成结果为原生可编辑元素，非图片拼接。</div>
+    <div class="hint">转换通常 5–20 秒；单文件上限 30MB。生成结果为原生可编辑元素，非图片拼接。
+      可选：先传自定义 .pptx 模板并点「预览版式」，确认自动探测出的语义版式后，再填文档转换。</div>
+    <div class="tplhc" style="margin-top:10px"></div>
   </form>
 </div>
 <script>
 const f=document.getElementById('f'),st=document.getElementById('st'),btn=document.getElementById('btn');
+const tplIn=document.getElementById('template');
+const tplWrap=document.createElement('div');
+tplWrap.innerHTML='<button id="previewBtn" type="button" style="margin-top:4px">预览模板版式</button>';
+tplIn.parentNode.appendChild(tplWrap);
+const pv=document.getElementById('previewBtn');
+pv.addEventListener('click',async()=>{
+  const tf=tplIn.files[0];
+  if(!tf){st.className='';st.textContent='请先选择模板文件';return;}
+  st.className='';st.textContent='正在分析模板…';
+  try{
+    const fd=new FormData();fd.append('template',tf);
+    const r=await fetch('/template-preview',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok){throw new Error(j.error||'分析失败')}
+    const rows=(j.layouts||[]).map(x=>`<tr><td>${x.sem}</td><td>${x.name||'-'}</td><td>${x.desc}</td></tr>`).join('');
+    const box=document.createElement('div');
+    box.style.cssText='margin-top:12px;background:#f6f9ff;border:1px solid #dbe3ee;border-radius:8px;padding:12px;font-size:13px';
+    box.innerHTML='<b>模板版式探测结果</b><table style="width:100%;margin-top:6px;border-collapse:collapse"><tr style="color:#6b7280"><th style="text-align:left">语义</th><th style="text-align:left">版式</th><th style="text-align:left">说明</th></tr>'+
+      rows+'<tr><td colspan=3 style="color:#6b7280;padding-top:8px">'+ (j.note||'') +'</td></tr></table>';
+    document.querySelector('.tplhc').innerHTML='';document.querySelector('.tplhc').appendChild(box);
+    st.textContent='模板已识别 '+(j.layouts||[]).length+' 个语义版式；可直接在下方填文档转换';
+  }catch(err){st.className='err';st.textContent='错误：'+err.message;}
+});
 let runStart=null,pool=null;
 f.addEventListener('submit',async e=>{
   e.preventDefault();btn.disabled=true;st.className='';st.textContent='正在转换，请稍候…';
   try{
-    // 先向服务端预申请 runId：转换是同步的，前端在 POST 期间无法收到进度，
-    // 因此先拿一个 id，POST /convert 时把 id 带回，转换期间轮询 /progress/<id>。
     const rr=await fetch('/runid',{method:'POST'});
     const id=(await rr.json()).id;
     runStart=Date.now();
@@ -302,6 +351,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/runid":
             # 预申请一个运行 id，前端先拿 id 再轮询进度、后发转换
             self._json(200, {"id": _progress_id()})
+            return
+        if path == "/template-preview":
+            # 自定义模板向导：只解析版式结构并回显命中语义，不落盘不转换
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                fields, files = parse_multipart(self.headers.get("Content-Type", ""),
+                                                self.rfile.read(n) if n > 0 else b"")
+                tpl_name, tpl_data = files.get("template", (None, None))
+                if not tpl_name or not tpl_data:
+                    raise ValueError("缺少模板文件")
+                rows = preview_template(tpl_name, tpl_data)
+                self._json(200, rows)
+            except Exception as e:  # noqa: BLE001 向导分析失败的兜底
+                self._json(400, {"error": str(e)})
             return
         if path != "/convert":
             self._json(404, {"error": "not found"})

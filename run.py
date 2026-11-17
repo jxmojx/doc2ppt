@@ -32,10 +32,16 @@ def main(argv=None):
                          "失败自动回退规则版）")
     ap.add_argument("--eval", action="store_true", help="批量评测并打印硬指标（不产出单文件说明）")
     ap.add_argument("--eval-dir", default=None, help="评测用例目录（默认 samples/）")
+    ap.add_argument("--dir", default=None, help="批量转换目录：遍历其中 docx/pdf/md，逐个出片")
+    ap.add_argument("--outdir", default=None, help="批量模式的输出目录（默认 <输入目录>/ppt_out）")
     args = ap.parse_args(argv)
 
     if args.eval:
         return _eval(Path(args.template), Path(args.eval_dir) if args.eval_dir else None)
+
+    if args.dir:
+        return _batch(Path(args.dir), Path(args.template),
+                      Path(args.outdir) if args.outdir else None, args.pages, args.llm)
 
     if not args.doc:
         ap.print_help()
@@ -117,6 +123,43 @@ def _run_once(doc, tpl, out, pages, preview=False, stats=None, use_llm=False):
     rounds, log, issues = fix.run(items, tpl, out, png_dir=png_dir, stats=stats)
     _emit("校验", f"渲染真值校验（{rounds} 轮修复完成）…")
     return blocks, items, rounds, log, issues
+
+
+def _batch(src_dir, tpl, out_dir=None, pages=8, use_llm=False):
+    """批量转换目录内所有 docx/pdf/md → 每个输出 .pptx，末尾打印摘要。
+
+    COM 渲染不支持并发，逐个串行；单文件失败不中断整批。
+    """
+    if not src_dir.exists() or not src_dir.is_dir():
+        print(f"错误: 目录不存在: {src_dir}", file=sys.stderr)
+        return 2
+    docs = sorted(p for p in src_dir.iterdir() if p.suffix.lower() in SUPPORTED)
+    if not docs:
+        print(f"目录中未找到 docx/pdf/md 文件: {src_dir}", file=sys.stderr)
+        return 1
+    out_dir = out_dir or (src_dir / "ppt_out")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    ok, fail = [], []
+    for i, doc in enumerate(docs, 1):
+        out = out_dir / (doc.stem + ".pptx")
+        try:
+            _blocks, items, _rounds, _log, issues = _run_once(
+                doc, tpl, out, pages, preview=False, use_llm=use_llm)
+            state = "OK" if not issues else f"问题{len(issues)}"
+            (ok if not issues else fail).append((doc.name, state, len(items)))
+            print(f"[{i}/{len(docs)}] {doc.name} -> {state} {len(items)}页")
+            for issue in issues[:3]:
+                print(f"      · p{issue.page_no} {issue.issue_type}: {issue.detail[:50]}")
+        except SystemExit as e:
+            fail.append((doc.name, str(e), 0))
+            print(f"[{i}/{len(docs)}] {doc.name} !! 失败: {e}", file=sys.stderr)
+    secs = time.time() - t0
+    print(f"\n批量完成: {len(ok)} 成功 / {len(fail)} 需人工 / 耗时 {secs:.1f}s")
+    if fail:
+        for name, why, _n in fail:
+            print(f"  ✗ {name}: {why}")
+    return 0 if not fail else 1
 
 
 def _eval(tpl, eval_dir=None):

@@ -127,7 +127,7 @@ test_smoke.py        38 个测试
 make_template.py     生成默认母版
 make_samples.py      生成三份样例
 skill/doc2ppt/       Agent Skill 封装（SKILL.md）
-DECISIONS.md         实现决策与踩坑记录（180 条）
+DECISIONS.md         实现决策与踩坑记录（181 条）
 LICENSE              MIT
 ```
 
